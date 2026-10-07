@@ -1,4 +1,8 @@
 const STREAMSTR_ROOT = "streamstr.stream";
+const ALLOWED_STREAMSTR_HOSTS = new Set([
+  "prehrajto.streamstr.stream",
+  "cdn.streamstr.stream"
+]);
 const REGISTER_ENDPOINT = "/api/media-proxy/register";
 
 function cleanHeaders(headers = {}) {
@@ -15,11 +19,7 @@ function cleanHeaders(headers = {}) {
 export function isStreamstrMediaUrl(value = "") {
   try {
     const parsed = new URL(String(value || ""));
-    const host = parsed.hostname.toLowerCase();
-    return (
-      parsed.protocol === "https:" &&
-      (host === STREAMSTR_ROOT || host.endsWith(`.${STREAMSTR_ROOT}`))
-    );
+    return parsed.protocol === "https:" && ALLOWED_STREAMSTR_HOSTS.has(parsed.hostname.toLowerCase());
   } catch (_) {
     return false;
   }
