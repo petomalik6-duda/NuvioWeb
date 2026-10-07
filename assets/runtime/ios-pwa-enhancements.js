@@ -7,6 +7,11 @@
   const isIOS = /iPad|iPhone|iPod/i.test(ua) || isTouchMac;
   if (!isIOS) return;
 
+  const STREAMSTR_HOSTS = new Set(["prehrajto.streamstr.stream", "cdn.streamstr.stream"]);
+  const MEDIA_PROXY_REGISTER_ENDPOINT = "/api/media-proxy/register";
+  const nativeMediaPlay = HTMLMediaElement.prototype.play;
+  const proxyRegistrationByVideo = new WeakMap();
+
   const root = document.documentElement;
   root.classList.add("nuvio-ios-webkit");
   if (window.matchMedia?.("(display-mode: standalone)")?.matches || navigator.standalone === true) {
@@ -17,6 +22,103 @@
   let controls = null;
   let airplayButton = null;
   let pipButton = null;
+
+  function isStreamstrUrl(value = "") {
+    try {
+      const url = new URL(String(value || ""), location.href);
+      return url.protocol === "https:" && STREAMSTR_HOSTS.has(url.hostname.toLowerCase());
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function currentVideoSource(video) {
+    return String(video?.currentSrc || video?.src || video?.getAttribute?.("src") || "").trim();
+  }
+
+  async function registerStreamstrProxy(video, sourceUrl) {
+    const current = proxyRegistrationByVideo.get(video);
+    if (current?.sourceUrl === sourceUrl && current?.promise) {
+      return current.promise;
+    }
+
+    const promise = (async () => {
+      const response = await fetch(MEDIA_PROXY_REGISTER_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        credentials: "same-origin",
+        cache: "no-store",
+        body: JSON.stringify({
+          url: sourceUrl,
+          filename: (() => {
+            try {
+              return decodeURIComponent(new URL(sourceUrl).pathname.split("/").pop() || "media");
+            } catch (_) {
+              return "media";
+            }
+          })()
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`Prehrajto proxy registration failed (${response.status})`);
+      }
+      const payload = await response.json();
+      const playbackUrl = String(payload?.playbackUrl || "").trim();
+      if (!playbackUrl) {
+        throw new Error("Prehrajto proxy registration returned no playback URL");
+      }
+
+      if (currentVideoSource(video) !== sourceUrl) {
+        return false;
+      }
+
+      video.dataset.nuvioPrehrajtoProxy = "1";
+      video.dataset.nuvioPrehrajtoOriginalHost = "prehrajto.streamstr.stream";
+      video.src = playbackUrl;
+      try {
+        video.load();
+      } catch (_) {}
+      console.info("[Nuvio iOS] Prehrajto media routed through same-origin proxy");
+      return true;
+    })()
+      .catch((error) => {
+        console.warn("[Nuvio iOS] Prehrajto proxy preparation failed", error);
+        return false;
+      })
+      .finally(() => {
+        const active = proxyRegistrationByVideo.get(video);
+        if (active?.promise === promise) {
+          proxyRegistrationByVideo.delete(video);
+        }
+      });
+
+    proxyRegistrationByVideo.set(video, { sourceUrl, promise });
+    return promise;
+  }
+
+  function installFinalPlayProxyHook() {
+    if (HTMLMediaElement.prototype.__nuvioPrehrajtoPlayHookInstalled) return;
+
+    Object.defineProperty(HTMLMediaElement.prototype, "__nuvioPrehrajtoPlayHookInstalled", {
+      value: true,
+      configurable: true
+    });
+
+    HTMLMediaElement.prototype.play = function nuvioIosPlayWithPrehrajtoProxy(...args) {
+      if (!(this instanceof HTMLVideoElement)) {
+        return nativeMediaPlay.apply(this, args);
+      }
+
+      const sourceUrl = currentVideoSource(this);
+      if (!isStreamstrUrl(sourceUrl)) {
+        return nativeMediaPlay.apply(this, args);
+      }
+
+      return registerStreamstrProxy(this, sourceUrl).then(() => nativeMediaPlay.apply(this, args));
+    };
+  }
 
   function visibleVideoCandidates() {
     return [...document.querySelectorAll("video")].filter((video) => {
@@ -144,6 +246,7 @@
   });
 
   function start() {
+    installFinalPlayProxyHook();
     ensureControls();
     document.querySelectorAll("video").forEach(enhanceVideo);
     observer.observe(document.documentElement, { childList: true, subtree: true });
