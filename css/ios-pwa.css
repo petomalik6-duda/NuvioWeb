@@ -1,0 +1,87 @@
+html.nuvio-ios-webkit,
+html.nuvio-ios-webkit body {
+  min-height: 100%;
+  min-height: 100dvh;
+  overscroll-behavior-y: none;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html.nuvio-ios-webkit body {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+}
+
+html.nuvio-ios-standalone body {
+  min-height: 100dvh;
+}
+
+.nuvio-ios-media-tools {
+  position: fixed;
+  z-index: 2147483000;
+  right: max(12px, env(safe-area-inset-right, 0px));
+  bottom: max(14px, calc(env(safe-area-inset-bottom, 0px) + 8px));
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.nuvio-ios-media-tools[hidden] {
+  display: none !important;
+}
+
+.nuvio-ios-media-tool {
+  appearance: none;
+  -webkit-appearance: none;
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: rgba(12, 12, 14, 0.82);
+  color: #fff;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  touch-action: manipulation;
+}
+
+.nuvio-ios-media-tool:active {
+  transform: scale(0.97);
+}
+
+.nuvio-airplay-glyph {
+  font-size: 12px;
+  transform: rotate(180deg);
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .nuvio-ios-media-tools {
+    right: max(10px, env(safe-area-inset-right, 0px));
+    bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  }
+
+  .nuvio-ios-media-tool {
+    min-height: 40px;
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+}
+
+@media (max-width: 640px) {
+  html.nuvio-ios-webkit button,
+  html.nuvio-ios-webkit [role="button"],
+  html.nuvio-ios-webkit a {
+    touch-action: manipulation;
+  }
+}
