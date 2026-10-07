@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
 
-const STREAMSTR_ROOT = "streamstr.stream";
+const ALLOWED_MEDIA_HOSTS = new Set([
+  "prehrajto.streamstr.stream",
+  "cdn.streamstr.stream"
+]);
 const TOKEN_TTL_MS = Math.max(
   5 * 60 * 1000,
   Number(process.env.NUVIO_MEDIA_PROXY_TOKEN_TTL_MS || 2 * 60 * 60 * 1000)
@@ -23,11 +26,7 @@ const forbiddenForwardHeaders = new Set([
 export function isAllowedBrowserMediaUrl(value = "") {
   try {
     const parsed = new URL(String(value || ""));
-    const host = parsed.hostname.toLowerCase();
-    return (
-      parsed.protocol === "https:" &&
-      (host === STREAMSTR_ROOT || host.endsWith(`.${STREAMSTR_ROOT}`))
-    );
+    return parsed.protocol === "https:" && ALLOWED_MEDIA_HOSTS.has(parsed.hostname.toLowerCase());
   } catch (_) {
     return false;
   }
@@ -48,10 +47,9 @@ export function sanitizeBrowserMediaHeaders(headers = {}) {
 }
 
 export function sanitizeBrowserMediaFilename(value = "") {
-  const basename = String(value || "")
-    .split(/[\\/]/)
-    .pop()
-    ?.replace(/[\u0000-\u001f\u007f]/g, "")
+  const raw = String(value || "").split(/[\\/]/).pop() || "";
+  const basename = raw
+    .replace(/[\u0000-\u001f\u007f]/g, "")
     .replace(/[^a-zA-Z0-9._()\[\] -]+/g, "_")
     .replace(/\s+/g, " ")
     .trim()
@@ -233,11 +231,9 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
     const requestUrl = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
 
     if (request.method === "OPTIONS") {
-      response.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Range, If-Range, If-None-Match, If-Modified-Since"
-      });
+      // Same-origin browser requests do not need CORS. Omitting ACAO here keeps
+      // third-party sites from turning this endpoint into a public bandwidth proxy.
+      response.writeHead(204, { "Cache-Control": "no-store" });
       response.end();
       return true;
     }
@@ -245,6 +241,11 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
     if (requestUrl.pathname === "/api/media-proxy/register") {
       if (request.method !== "POST") {
         writeJson(response, 405, { error: "Method not allowed" });
+        return true;
+      }
+      const contentType = String(request.headers["content-type"] || "").toLowerCase();
+      if (!contentType.startsWith("application/json")) {
+        writeJson(response, 415, { error: "JSON request required" });
         return true;
       }
       let body;
@@ -379,9 +380,11 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
       response.end();
       return true;
     }
-    Readable.fromWeb(upstream.body).on("error", () => {
-      if (!response.writableEnded) response.end();
-    }).pipe(response);
+    Readable.fromWeb(upstream.body)
+      .on("error", () => {
+        if (!response.writableEnded) response.end();
+      })
+      .pipe(response);
     response.on("close", () => {
       if (!response.writableEnded) {
         try {
