@@ -3,6 +3,7 @@ import { addonRepository } from "./addonRepository.js";
 import { StreamApi } from "../remote/api/streamApi.js";
 import { MetaApi } from "../remote/api/metaApi.js";
 import { PluginManager } from "../../core/player/pluginManager.js";
+import { prepareBrowserMediaProxyStream } from "../../core/player/browserMediaProxy.js";
 import { TmdbService } from "../../core/tmdb/tmdbService.js";
 import { LocalDebridAvailabilityService } from "../../core/debrid/localDebridAvailabilityService.js";
 import { DebridStreamPresentation } from "../../core/debrid/directDebridStreamPresentation.js";
@@ -15,7 +16,11 @@ class StreamRepository {
       return result;
     }
 
-    const streams = (result.data?.streams || []).map((stream) => this.mapStream(stream));
+    const streams = await Promise.all(
+      (result.data?.streams || []).map((stream) =>
+        prepareBrowserMediaProxyStream(this.mapStream(stream))
+      )
+    );
     return { status: "success", data: streams };
   }
 
@@ -207,28 +212,35 @@ class StreamRepository {
       episode: options?.episode ?? null
     });
 
-    return pluginResults.map((result) => ({
-      sourceProviderId: result.sourceId || result.sourceName || null,
-      addonName: result.sourceName,
-      addonLogo: null,
-      streamOrigin: {
-        kind: "plugin",
-        sourceProviderId: result.sourceId || result.sourceName || null,
-        addonName: result.sourceName || null
-      },
-      streams: (result.streams || []).map((stream) => ({
-        ...stream,
+    return Promise.all(
+      pluginResults.map(async (result) => ({
         sourceProviderId: result.sourceId || result.sourceName || null,
         addonName: result.sourceName,
         addonLogo: null,
         streamOrigin: {
-          ...(stream.streamOrigin || {}),
           kind: "plugin",
           sourceProviderId: result.sourceId || result.sourceName || null,
           addonName: result.sourceName || null
-        }
+        },
+        streams: await Promise.all(
+          (result.streams || []).map(async (stream) => {
+            const preparedStream = await prepareBrowserMediaProxyStream(stream);
+            return {
+              ...preparedStream,
+              sourceProviderId: result.sourceId || result.sourceName || null,
+              addonName: result.sourceName,
+              addonLogo: null,
+              streamOrigin: {
+                ...(preparedStream.streamOrigin || {}),
+                kind: "plugin",
+                sourceProviderId: result.sourceId || result.sourceName || null,
+                addonName: result.sourceName || null
+              }
+            };
+          })
+        )
       }))
-    }));
+    );
   }
 
   buildStreamUrl(baseUrl, type, videoId) {
@@ -322,16 +334,19 @@ class StreamRepository {
 
       const streams = Array.isArray(matchingVideo?.streams) ? matchingVideo.streams : [];
 
-      const mapped = streams
-        .map((stream) => this.mapStream(stream))
-        .filter(
-          (stream) =>
-            stream.url ||
-            stream.externalUrl ||
-            stream.ytId ||
-            stream.clientResolve ||
-            stream.infoHash
-        );
+      const mapped = await Promise.all(
+        streams
+          .map((stream) => this.mapStream(stream))
+          .filter(
+            (stream) =>
+              stream.url ||
+              stream.externalUrl ||
+              stream.ytId ||
+              stream.clientResolve ||
+              stream.infoHash
+          )
+          .map((stream) => prepareBrowserMediaProxyStream(stream))
+      );
 
       if (mapped.length) {
         return mapped;
