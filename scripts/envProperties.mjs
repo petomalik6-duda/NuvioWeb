@@ -99,6 +99,16 @@ export function normalizeEnvProperties(properties = {}) {
   return env;
 }
 
+function readProcessEnvOverrides() {
+  const overrides = {};
+  ENV_PROPERTY_KEYS.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(process.env, key)) {
+      overrides[key] = String(process.env[key] ?? "");
+    }
+  });
+  return overrides;
+}
+
 export async function resolveLocalPropertiesSource({ rootDir, sourcePath = "" } = {}) {
   const candidates = [];
   if (sourcePath) {
@@ -120,10 +130,12 @@ export async function resolveLocalPropertiesSource({ rootDir, sourcePath = "" } 
 
 export async function readEnvProperties({ rootDir, sourcePath = "" } = {}) {
   const resolvedSourcePath = await resolveLocalPropertiesSource({ rootDir, sourcePath });
+  const processOverrides = readProcessEnvOverrides();
+
   if (!resolvedSourcePath) {
     return {
       sourcePath: "",
-      env: normalizeEnvProperties({})
+      env: normalizeEnvProperties(processOverrides)
     };
   }
   if (/\.js$/i.test(resolvedSourcePath)) {
@@ -134,7 +146,7 @@ export async function readEnvProperties({ rootDir, sourcePath = "" } = {}) {
   const properties = parseProperties(await readFile(resolvedSourcePath, "utf8"));
   return {
     sourcePath: resolvedSourcePath,
-    env: normalizeEnvProperties(properties)
+    env: normalizeEnvProperties({ ...properties, ...processOverrides })
   };
 }
 
@@ -159,10 +171,6 @@ export async function writeRuntimeEnvScriptFile(
   { rootDir, sourcePath = "" } = {}
 ) {
   const result = await readEnvProperties({ rootDir, sourcePath });
-  await writeFile(
-    targetPath,
-    buildRuntimeEnvScript(result.env),
-    "utf8"
-  );
+  await writeFile(targetPath, buildRuntimeEnvScript(result.env), "utf8");
   return result;
 }
