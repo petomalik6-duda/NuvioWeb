@@ -361,7 +361,10 @@ async function proxyMediaHlsRequest(request, response, token, tail) {
       }
       resolve();
     });
-    request.on("close", () => {
+    request.on("aborted", () => {
+      upstreamRequest.destroy();
+    });
+    response.on("close", () => {
       if (!response.writableEnded) {
         upstreamRequest.destroy();
       }
