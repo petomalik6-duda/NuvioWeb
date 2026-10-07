@@ -57,6 +57,99 @@ export function sanitizeBrowserMediaFilename(value = "") {
   return basename || "media";
 }
 
+function isGenericMediaContentType(value = "") {
+  const normalized = String(value || "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  return (
+    !normalized ||
+    normalized === "application/octet-stream" ||
+    normalized === "binary/octet-stream" ||
+    normalized === "application/binary" ||
+    normalized === "application/download"
+  );
+}
+
+function mimeFromFilename(filename = "") {
+  const clean = String(filename || "").split("?")[0].toLowerCase();
+  if (clean.endsWith(".mp4") || clean.endsWith(".m4v")) return "video/mp4";
+  if (clean.endsWith(".mov")) return "video/quicktime";
+  if (clean.endsWith(".mkv")) return "video/x-matroska";
+  if (clean.endsWith(".webm")) return "video/webm";
+  if (clean.endsWith(".ts") || clean.endsWith(".m2ts")) return "video/mp2t";
+  return "";
+}
+
+export function sniffMediaMime(value) {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value || 0);
+  if (!bytes.length) return "";
+
+  if (
+    bytes.length >= 12 &&
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70
+  ) {
+    return "video/mp4";
+  }
+
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x1a &&
+    bytes[1] === 0x45 &&
+    bytes[2] === 0xdf &&
+    bytes[3] === 0xa3
+  ) {
+    const prefix = Buffer.from(bytes.subarray(0, Math.min(bytes.length, 4096)))
+      .toString("latin1")
+      .toLowerCase();
+    return prefix.includes("webm") ? "video/webm" : "video/x-matroska";
+  }
+
+  if (bytes[0] === 0x47) {
+    if (bytes.length < 189 || bytes[188] === 0x47) {
+      return "video/mp2t";
+    }
+  }
+
+  const textPrefix = Buffer.from(bytes.subarray(0, Math.min(bytes.length, 1024)))
+    .toString("utf8")
+    .trimStart()
+    .toLowerCase();
+  if (
+    textPrefix.startsWith("<!doctype html") ||
+    textPrefix.startsWith("<html") ||
+    textPrefix.includes("<html")
+  ) {
+    return "text/html";
+  }
+
+  return "";
+}
+
+async function sniffReadableBody(body) {
+  if (!body || typeof body.tee !== "function") {
+    return { body, detectedMime: "" };
+  }
+  const [sniffBranch, playbackBranch] = body.tee();
+  const reader = sniffBranch.getReader();
+  try {
+    const first = await reader.read();
+    return {
+      body: playbackBranch,
+      detectedMime: first?.value ? sniffMediaMime(first.value) : ""
+    };
+  } finally {
+    try {
+      await reader.cancel();
+    } catch (_) {
+      // Best effort. The playback branch remains untouched.
+    }
+  }
+}
+
 function isHlsResponse(url = "", contentType = "") {
   const normalizedType = String(contentType || "").toLowerCase();
   if (
@@ -338,7 +431,7 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
     const baseHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Expose-Headers":
-        "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag, Last-Modified",
+        "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag, Last-Modified, X-Nuvio-Detected-Mime",
       "Cache-Control": "private, no-store"
     };
     copyResponseHeader(upstream, baseHeaders, "content-type");
@@ -352,6 +445,13 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
     }
 
     if (request.method === "HEAD") {
+      if (isGenericMediaContentType(contentType)) {
+        const filenameMime = mimeFromFilename(entry.filename);
+        if (filenameMime) {
+          baseHeaders["Content-Type"] = filenameMime;
+          baseHeaders["X-Nuvio-Detected-Mime"] = filenameMime;
+        }
+      }
       response.writeHead(upstream.status || 200, baseHeaders);
       upstream.body?.cancel?.().catch?.(() => {});
       response.end();
@@ -375,12 +475,42 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
       return true;
     }
 
+    let playbackBody = upstream.body;
+    let detectedMime = "";
+    if (playbackBody && isGenericMediaContentType(contentType)) {
+      const sniffed = await sniffReadableBody(playbackBody);
+      playbackBody = sniffed.body;
+      detectedMime = sniffed.detectedMime || mimeFromFilename(entry.filename);
+      if (detectedMime === "text/html") {
+        playbackBody?.cancel?.().catch?.(() => {});
+        writeJson(response, 502, {
+          error: "Media provider returned a browser verification page instead of video",
+          upstreamStatus: Number(upstream.status || 0)
+        });
+        return true;
+      }
+      if (detectedMime) {
+        baseHeaders["Content-Type"] = detectedMime;
+        baseHeaders["X-Nuvio-Detected-Mime"] = detectedMime;
+      }
+    }
+
+    let providerHost = "unknown";
+    try {
+      providerHost = new URL(finalUrl).hostname;
+    } catch (_) {}
+    console.info(
+      `[media-proxy] host=${providerHost} status=${Number(upstream.status || 0)} upstreamType=${
+        contentType || "none"
+      } detected=${detectedMime || "none"}`
+    );
+
     response.writeHead(upstream.status || 200, baseHeaders);
-    if (!upstream.body) {
+    if (!playbackBody) {
       response.end();
       return true;
     }
-    Readable.fromWeb(upstream.body)
+    Readable.fromWeb(playbackBody)
       .on("error", () => {
         if (!response.writableEnded) response.end();
       })
@@ -388,7 +518,7 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
     response.on("close", () => {
       if (!response.writableEnded) {
         try {
-          upstream.body?.cancel?.();
+          playbackBody?.cancel?.();
         } catch (_) {
           // Best effort when the browser cancels a Range request.
         }
