@@ -2,6 +2,9 @@ import http from "node:http";
 
 const originalRequest = http.request.bind(http);
 
+const SAFARI_VIDEO_CODECS = ["h264", "h265", "hevc"];
+const SAFARI_AUDIO_CODECS = ["aac", "ac3", "eac3", "mp3", "opus"];
+
 function rewriteHlsPath(options) {
   if (!options || typeof options !== "object") return options;
   const host = String(options.hostname || options.host || "").toLowerCase();
@@ -12,8 +15,25 @@ function rewriteHlsPath(options) {
 
   try {
     const parsed = new URL(pathname, "http://127.0.0.1");
-    if (parsed.searchParams.get("forceTranscoding") !== "1") return options;
+
+    // Let EngineFS decide between stream-copy and transcoding from the real
+    // browser capabilities. Forcing transcoding made 4K HEVC unusable on the
+    // small Render instance even though iOS Safari can decode HEVC natively.
     parsed.searchParams.delete("forceTranscoding");
+
+    // EngineFS accepts repeated videoCodecs/audioCodecs parameters. Without
+    // them it assumes a conservative compatibility set and transcodes HEVC +
+    // E-AC3 to H.264/AAC. Modern iOS Safari supports these codecs in HLS/fMP4,
+    // so advertise them explicitly and allow a zero-copy remux when possible.
+    parsed.searchParams.delete("videoCodecs");
+    parsed.searchParams.delete("audioCodecs");
+    for (const codec of SAFARI_VIDEO_CODECS) {
+      parsed.searchParams.append("videoCodecs", codec);
+    }
+    for (const codec of SAFARI_AUDIO_CODECS) {
+      parsed.searchParams.append("audioCodecs", codec);
+    }
+
     return {
       ...options,
       path: `${parsed.pathname}${parsed.search}`
