@@ -87,8 +87,18 @@ function patchPrehrajtoSafariH264(args) {
     '41',
     codecIndex >= 0 ? codecIndex + 1 : -1
   );
+  patched = setOrInsertOption(patched, ['-threads'], '-threads', '2');
 
-  console.log('[ffmpeg-copy-fix] Prehrajto H264 Safari output: yuv420p level 4.1');
+  console.log('[ffmpeg-copy-fix] Prehrajto H264 Safari output: yuv420p level 4.1 threads=2');
+  return patched;
+}
+
+function patchPrehrajtoAudioResources(args) {
+  if (!isPrehrajtoProxyInput(args)) return args;
+  if (!hasArgValue(args, ['-c:a', '-codec:a'], 'aac')) return args;
+  if (hasArgValue(args, ['-c:v', '-codec:v'], 'libx264')) return args;
+  const patched = setOrInsertOption(args, ['-threads'], '-threads', '1');
+  console.log('[ffmpeg-copy-fix] Prehrajto AAC audio threads=1');
   return patched;
 }
 
@@ -96,6 +106,7 @@ function patchArgs(command, args) {
   if (!isFfmpegCommand(command) || !Array.isArray(args)) return args;
 
   let patchedArgs = patchPrehrajtoSafariH264(args);
+  patchedArgs = patchPrehrajtoAudioResources(patchedArgs);
   let usesVideoCopy = false;
   for (let i = 0; i < patchedArgs.length - 1; i += 1) {
     if (
