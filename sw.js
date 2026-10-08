@@ -5,7 +5,7 @@ const APP_SHELL = [
   "./index.html",
   "./boot-guard.js",
   "./assets/runtime/legacy-features.js",
-  "./assets/runtime/ios-prehrajto-external-player.js",
+  "./assets/runtime/ios-fastshare3-external-url.js",
   "./assets/runtime/ios-pwa-enhancements.js",
   "./core-js.bundle.js",
   "./app.bundle.js",
