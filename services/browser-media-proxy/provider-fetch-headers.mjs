@@ -4,6 +4,13 @@ const PROVIDER_ROOTS = ["streamstr.stream", "premiumcdn.net"];
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const ACCEPT_LANGUAGE = "cs-CZ,cs;q=0.9,en;q=0.8";
+const GENERIC_CONTENT_TYPES = new Set([
+  "",
+  "application/octet-stream",
+  "binary/octet-stream",
+  "application/binary",
+  "application/download"
+]);
 
 function isProviderUrl(value = "") {
   try {
@@ -21,6 +28,32 @@ function isProviderUrl(value = "") {
 function inputUrl(input) {
   if (typeof input === "string" || input instanceof URL) return String(input);
   return String(input?.url || "");
+}
+
+function normalizedContentType(response) {
+  return String(response?.headers?.get?.("content-type") || "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+}
+
+function withImmediateStreamingMime(response) {
+  if (!response || response.status < 200 || response.status >= 300) return response;
+  if (!GENERIC_CONTENT_TYPES.has(normalizedContentType(response))) return response;
+
+  const headers = new Headers(response.headers || {});
+  // This is an internal proxy MIME marker. The media bridge treats generic
+  // octet-stream responses as needing first-chunk sniffing; ffprobe does not
+  // need that sniffing and can detect the actual container from the bytes.
+  // Marking the internal response non-generic lets bytes flow immediately.
+  headers.set("Content-Type", "application/vnd.nuvio.raw-media");
+  headers.set("X-Nuvio-Original-Content-Type", normalizedContentType(response) || "none");
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
 }
 
 globalThis.fetch = async function providerCompatibleFetch(input, init = {}) {
@@ -48,9 +81,11 @@ globalThis.fetch = async function providerCompatibleFetch(input, init = {}) {
     headers.set("Range", "bytes=0-");
   }
 
-  return nativeFetch(input, {
+  const response = await nativeFetch(input, {
     ...init,
     method,
     headers
   });
+
+  return withImmediateStreamingMime(response);
 };
