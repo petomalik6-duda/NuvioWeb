@@ -56,6 +56,27 @@ function withImmediateStreamingMime(response) {
   });
 }
 
+// Node throws ERR_INVALID_STATE when code calls ReadableStream.cancel() after
+// Readable.fromWeb() has locked that stream. The media proxy only does this as
+// best-effort cleanup after the HTTP response closes, so a no-op is correct for
+// an already locked stream and prevents the whole Render process from exiting.
+if (typeof ReadableStream !== "undefined" && ReadableStream.prototype?.cancel) {
+  const nativeCancel = ReadableStream.prototype.cancel;
+  ReadableStream.prototype.cancel = function safeCancel(reason) {
+    if (this.locked) return Promise.resolve();
+    try {
+      const result = nativeCancel.call(this, reason);
+      return Promise.resolve(result).catch((error) => {
+        if (error?.code === "ERR_INVALID_STATE") return undefined;
+        throw error;
+      });
+    } catch (error) {
+      if (error?.code === "ERR_INVALID_STATE") return Promise.resolve();
+      throw error;
+    }
+  };
+}
+
 globalThis.fetch = async function providerCompatibleFetch(input, init = {}) {
   const url = inputUrl(input);
   if (!isProviderUrl(url)) return nativeFetch(input, init);
