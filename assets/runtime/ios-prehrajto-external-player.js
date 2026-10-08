@@ -14,7 +14,6 @@
   const prehrajtoStreamsById = new Map();
   const prehrajtoStreamsByUrl = new Map();
   const proxyPreparationByUrl = new Map();
-  let launchOverlay = null;
 
   function isPrehrajtoEntryUrl(value = "") {
     try {
@@ -59,7 +58,12 @@
       configured = String(stored.browserExternalPlayer || "").trim().toLowerCase();
     }
 
-    return EXTERNAL_PLAYERS.has(configured) ? configured : DEFAULT_EXTERNAL_PLAYER;
+    // Match NuvioWeb's PlayerSettingsStore contract exactly: Lenna is the
+    // browser default until the user stores a preference; an explicit
+    // "disabled" must remain disabled rather than being coerced back to Lenna.
+    if (configured === "disabled") return "disabled";
+    if (EXTERNAL_PLAYERS.has(configured)) return configured;
+    return DEFAULT_EXTERNAL_PLAYER;
   }
 
   function filenameFromUrl(value = "") {
@@ -126,7 +130,10 @@
           throw new Error(`Prehrajto proxy registration failed (${response.status})`);
         }
         const payload = await response.json();
-        const playbackUrl = String(payload?.playbackUrl || "").trim();
+        // External players can consume the byte-range proxy directly. Prefer it
+        // over the Safari-specific HLS conversion path so Prehraj.to behaves
+        // like every other transferable external stream.
+        const playbackUrl = String(payload?.nativePlaybackUrl || payload?.playbackUrl || "").trim();
         if (!playbackUrl) {
           throw new Error("Prehrajto proxy registration returned no playback URL");
         }
@@ -161,7 +168,13 @@
     };
     prehrajtoStreamsById.set(streamId, entry);
     prehrajtoStreamsByUrl.set(sourceUrl, entry);
-    void prewarmPrehrajtoProxy(sourceUrl);
+
+    // Only prepare an external handoff when external playback is actually
+    // enabled. With Disabled selected, Prehraj.to must follow the normal
+    // internal-player path exactly like the other streams.
+    if (getConfiguredExternalPlayer() !== "disabled") {
+      void prewarmPrehrajtoProxy(sourceUrl);
+    }
   }
 
   function scanStreamPayload(value, inheritedGroupName = "Addon", seen = new WeakSet()) {
@@ -236,83 +249,12 @@
     return scored[0]?.entry || null;
   }
 
-  function destroyLaunchOverlay() {
-    launchOverlay?.remove?.();
-    launchOverlay = null;
-  }
-
-  function showLaunchOverlay(entry, { returnOnCancel = false } = {}) {
-    destroyLaunchOverlay();
-    const player = getConfiguredExternalPlayer();
+  async function launchRememberedStream(entry, player) {
+    if (!entry || player === "disabled") return false;
     const state = proxyPreparationByUrl.get(entry.url);
-
-    const overlay = document.createElement("div");
-    overlay.style.cssText =
-      "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.86);display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,sans-serif;";
-    const panel = document.createElement("div");
-    panel.style.cssText =
-      "width:min(92vw,420px);background:#171717;color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:18px;padding:20px;box-sizing:border-box;text-align:center;box-shadow:0 24px 70px rgba(0,0,0,.45);";
-    const title = document.createElement("div");
-    title.textContent = "Prehraj.to";
-    title.style.cssText = "font-size:20px;font-weight:700;margin-bottom:8px;";
-    const status = document.createElement("div");
-    status.textContent = state?.proxyUrl ? `Otvoriť v ${player}` : "Pripravujem externé prehrávanie…";
-    status.style.cssText = "font-size:14px;opacity:.78;margin-bottom:18px;line-height:1.4;";
-    const openButton = document.createElement("button");
-    openButton.type = "button";
-    openButton.textContent = `Otvoriť v ${player}`;
-    openButton.disabled = !state?.proxyUrl;
-    openButton.style.cssText =
-      "width:100%;border:0;border-radius:12px;padding:14px 16px;font-size:16px;font-weight:700;cursor:pointer;margin-bottom:10px;";
-    const cancelButton = document.createElement("button");
-    cancelButton.type = "button";
-    cancelButton.textContent = "Späť";
-    cancelButton.style.cssText =
-      "width:100%;border:1px solid rgba(255,255,255,.2);border-radius:12px;padding:12px 16px;font-size:15px;background:transparent;color:#fff;cursor:pointer;";
-
-    const activate = (proxyUrl) => {
-      if (!proxyUrl) return;
-      openButton.disabled = false;
-      status.textContent = `Otvoriť v ${player}`;
-      openButton.onclick = () => {
-        const href = buildExternalLaunchUrl(player, proxyUrl, { title: document.title || "Nuvio" });
-        launchExternal(href);
-      };
-    };
-
-    if (state?.proxyUrl) activate(state.proxyUrl);
-    else {
-      void prewarmPrehrajtoProxy(entry.url).then((proxyUrl) => {
-        if (!overlay.isConnected) return;
-        if (proxyUrl) activate(proxyUrl);
-        else status.textContent = "Prehraj.to link sa nepodarilo pripraviť. Skús zdroj znova.";
-      });
-    }
-
-    cancelButton.onclick = () => {
-      destroyLaunchOverlay();
-      if (returnOnCancel && history.length > 1) history.back();
-    };
-    panel.append(title, status, openButton, cancelButton);
-    overlay.appendChild(panel);
-    document.body.appendChild(overlay);
-    launchOverlay = overlay;
-  }
-
-  function tryLaunchRememberedStream(entry) {
-    if (!entry) return false;
-    const state = proxyPreparationByUrl.get(entry.url);
-    const proxyUrl = String(state?.proxyUrl || "").trim();
-    if (!proxyUrl) {
-      showLaunchOverlay(entry);
-      return true;
-    }
-    const player = getConfiguredExternalPlayer();
+    const proxyUrl = String(state?.proxyUrl || "").trim() || (await prewarmPrehrajtoProxy(entry.url));
+    if (!proxyUrl) return false;
     const href = buildExternalLaunchUrl(player, proxyUrl, { title: document.title || "Nuvio" });
-    if (!href) {
-      showLaunchOverlay(entry);
-      return true;
-    }
     return launchExternal(href);
   }
 
@@ -324,12 +266,22 @@
         if (!(target instanceof Element)) return;
         const card = target.closest(".stream-route-card[data-action='playStream'][data-stream-id]");
         if (!card) return;
+
+        const player = getConfiguredExternalPlayer();
+        // Exactly like other streams: when External Player is disabled, do not
+        // intercept at all; Nuvio's normal internal route owns the click.
+        if (player === "disabled") return;
+
         const entry = findRememberedPrehrajto(card);
         if (!entry) return;
 
         event.preventDefault();
         event.stopImmediatePropagation();
-        tryLaunchRememberedStream(entry);
+        void launchRememberedStream(entry, player).then((launched) => {
+          if (!launched) {
+            console.warn("[Nuvio iOS] External Prehrajto launch failed");
+          }
+        });
       },
       true
     );
@@ -348,10 +300,16 @@
       const sourceUrl = currentVideoSource(this);
       if (!isPrehrajtoEntryUrl(sourceUrl)) return previousPlay.apply(this, args);
 
+      const player = getConfiguredExternalPlayer();
+      // Respect the same Disabled setting as the regular stream route. This is
+      // the key difference from the previous provider-specific implementation.
+      if (player === "disabled") {
+        return previousPlay.apply(this, args);
+      }
+
       const entry = prehrajtoStreamsByUrl.get(sourceUrl) || { id: sourceUrl, url: sourceUrl, label: "" };
-      void prewarmPrehrajtoProxy(sourceUrl);
-      queueMicrotask(() => showLaunchOverlay(entry, { returnOnCancel: true }));
-      console.info("[Nuvio iOS] Blocked internal Prehrajto playback; external player required");
+      void launchRememberedStream(entry, player);
+      console.info(`[Nuvio iOS] Prehrajto follows External Player setting: ${player}`);
       return Promise.resolve(false);
     };
   }
