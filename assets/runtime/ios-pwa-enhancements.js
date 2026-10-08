@@ -11,6 +11,8 @@
   const MEDIA_PROXY_REGISTER_ENDPOINT = "/api/media-proxy/register";
   const nativeMediaPlay = HTMLMediaElement.prototype.play;
   const proxyRegistrationByVideo = new WeakMap();
+  const deferredResumeByVideo = new WeakMap();
+  const applyingDeferredResume = new WeakSet();
 
   const root = document.documentElement;
   root.classList.add("nuvio-ios-webkit");
@@ -32,8 +34,76 @@
     }
   }
 
+  function isNuvioMediaHlsUrl(value = "") {
+    try {
+      const url = new URL(String(value || ""), location.href);
+      return (
+        url.origin === location.origin &&
+        /^\/api\/media-hls\/[^/]+\/master\.m3u8$/i.test(url.pathname)
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
   function currentVideoSource(video) {
     return String(video?.currentSrc || video?.src || video?.getAttribute?.("src") || "").trim();
+  }
+
+  function installDeferredHlsResumeHook() {
+    if (HTMLMediaElement.prototype.__nuvioDeferredHlsResumeInstalled) return;
+
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "currentTime");
+    if (!descriptor?.get || !descriptor?.set || descriptor.configurable === false) return;
+
+    Object.defineProperty(HTMLMediaElement.prototype, "__nuvioDeferredHlsResumeInstalled", {
+      value: true,
+      configurable: true
+    });
+
+    Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
+      configurable: true,
+      enumerable: descriptor.enumerable,
+      get: descriptor.get,
+      set(value) {
+        const target = Number(value);
+        const sourceUrl = currentVideoSource(this);
+        const shouldDefer =
+          this instanceof HTMLVideoElement &&
+          isNuvioMediaHlsUrl(sourceUrl) &&
+          !applyingDeferredResume.has(this) &&
+          Number.isFinite(target) &&
+          target > 5 &&
+          Number(this.readyState || 0) < 2;
+
+        if (shouldDefer) {
+          deferredResumeByVideo.set(this, target);
+          this.dataset.nuvioDeferredResume = String(target);
+          return descriptor.set.call(this, 0);
+        }
+
+        return descriptor.set.call(this, value);
+      }
+    });
+  }
+
+  function applyDeferredResumeIfReady(video) {
+    if (!(video instanceof HTMLVideoElement)) return false;
+    const target = Number(deferredResumeByVideo.get(video));
+    if (!Number.isFinite(target) || target <= 5 || Number(video.readyState || 0) < 2) return false;
+
+    deferredResumeByVideo.delete(video);
+    delete video.dataset.nuvioDeferredResume;
+    applyingDeferredResume.add(video);
+    try {
+      video.currentTime = target;
+      console.info(`[Nuvio iOS] Applied deferred HLS resume at ${Math.round(target)}s`);
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      applyingDeferredResume.delete(video);
+    }
   }
 
   async function registerStreamstrProxy(video, sourceUrl) {
@@ -76,6 +146,8 @@
 
       video.dataset.nuvioPrehrajtoProxy = "1";
       video.dataset.nuvioPrehrajtoOriginalHost = "prehrajto.streamstr.stream";
+      deferredResumeByVideo.delete(video);
+      delete video.dataset.nuvioDeferredResume;
       video.src = playbackUrl;
       try {
         video.load();
@@ -147,7 +219,13 @@
 
     video.addEventListener("play", refreshControls, { passive: true });
     video.addEventListener("loadedmetadata", refreshControls, { passive: true });
-    video.addEventListener("emptied", refreshControls, { passive: true });
+    video.addEventListener("loadeddata", () => applyDeferredResumeIfReady(video), { passive: true });
+    video.addEventListener("canplay", () => applyDeferredResumeIfReady(video), { passive: true });
+    video.addEventListener("emptied", () => {
+      deferredResumeByVideo.delete(video);
+      delete video.dataset.nuvioDeferredResume;
+      refreshControls();
+    }, { passive: true });
     video.addEventListener("webkitplaybacktargetavailabilitychanged", refreshControls, {
       passive: true
     });
@@ -246,6 +324,7 @@
   });
 
   function start() {
+    installDeferredHlsResumeHook();
     installFinalPlayProxyHook();
     ensureControls();
     document.querySelectorAll("video").forEach(enhanceVideo);
