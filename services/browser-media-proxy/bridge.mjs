@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
 
-const ALLOWED_MEDIA_ROOT = "streamstr.stream";
+const MEDIA_ENTRY_ROOT = "streamstr.stream";
+const MEDIA_REDIRECT_ROOTS = ["streamstr.stream", "premiumcdn.net"];
 const TOKEN_TTL_MS = Math.max(
   5 * 60 * 1000,
   Number(process.env.NUVIO_MEDIA_PROXY_TOKEN_TTL_MS || 2 * 60 * 60 * 1000)
@@ -20,17 +21,27 @@ const forbiddenForwardHeaders = new Set([
   "trailer"
 ]);
 
-export function isAllowedBrowserMediaUrl(value = "") {
+function hostnameMatchesRoot(hostname, root) {
+  return hostname === root || hostname.endsWith(`.${root}`);
+}
+
+function isAllowedHttpsUrlForRoots(value, roots) {
   try {
     const parsed = new URL(String(value || ""));
+    if (parsed.protocol !== "https:") return false;
     const hostname = parsed.hostname.toLowerCase();
-    return (
-      parsed.protocol === "https:" &&
-      (hostname === ALLOWED_MEDIA_ROOT || hostname.endsWith(`.${ALLOWED_MEDIA_ROOT}`))
-    );
+    return roots.some((root) => hostnameMatchesRoot(hostname, root));
   } catch (_) {
     return false;
   }
+}
+
+export function isAllowedBrowserMediaEntryUrl(value = "") {
+  return isAllowedHttpsUrlForRoots(value, [MEDIA_ENTRY_ROOT]);
+}
+
+export function isAllowedBrowserMediaUrl(value = "") {
+  return isAllowedHttpsUrlForRoots(value, MEDIA_REDIRECT_ROOTS);
 }
 
 export function sanitizeBrowserMediaHeaders(headers = {}) {
@@ -257,7 +268,7 @@ async function fetchWithAllowedRedirects(fetchImpl, initialUrl, options, maxRedi
   let currentUrl = initialUrl;
   for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
     if (!isAllowedBrowserMediaUrl(currentUrl)) {
-      throw new Error("Media redirect left the allowed provider domain");
+      throw new Error("Media redirect left the allowed provider/CDN domains");
     }
     const upstream = await fetchImpl(currentUrl, {
       ...options,
@@ -270,6 +281,11 @@ async function fetchWithAllowedRedirects(fetchImpl, initialUrl, options, maxRedi
     if (!nextUrl) {
       return { upstream, finalUrl: currentUrl };
     }
+    let nextHost = "unknown";
+    try {
+      nextHost = new URL(nextUrl).hostname;
+    } catch (_) {}
+    console.info(`[media-proxy] redirect host=${nextHost}`);
     currentUrl = nextUrl;
   }
   throw new Error("Too many media redirects");
@@ -330,8 +346,6 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
     const rawPlaybackRequest = requestUrl.searchParams.get("__nuvio_raw") === "1";
 
     if (request.method === "OPTIONS") {
-      // Same-origin browser requests do not need CORS. Omitting ACAO here keeps
-      // third-party sites from turning this endpoint into a public bandwidth proxy.
       response.writeHead(204, { "Cache-Control": "no-store" });
       response.end();
       return true;
@@ -355,7 +369,7 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
         return true;
       }
       const targetUrl = String(body?.url || "").trim();
-      if (!isAllowedBrowserMediaUrl(targetUrl)) {
+      if (!isAllowedBrowserMediaEntryUrl(targetUrl)) {
         writeJson(response, 403, { error: "Unsupported media provider" });
         return true;
       }
@@ -424,7 +438,7 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
     } catch (error) {
       console.warn(
         `[media-proxy] provider-request-failed host=${initialProviderHost} reason=${
-          String(error?.message || "request-failed").replace(/\s+/g, " ").slice(0, 120)
+          String(error?.message || "request-failed").replace(/\s+/g, " ").slice(0, 160)
         }`
       );
       writeJson(response, 502, {
