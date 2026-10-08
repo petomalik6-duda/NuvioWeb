@@ -161,6 +161,60 @@ function isPrehrajtoSoftwareH264Transcode(args) {
   return isPrehrajtoProxyInput(args) && hasArgValue(args, ['-c:v', '-codec:v'], 'libx264');
 }
 
+function isPrehrajto4kDownscaleTranscode(args) {
+  if (!isPrehrajtoSoftwareH264Transcode(args)) return false;
+  const filter = argValue(args, '-vf');
+  return /(?:^|,)scale=1920:-2(?=[:,]|$)/i.test(filter);
+}
+
+function patchPrehrajto4kHevcStreamCopy(args) {
+  if (!isPrehrajto4kDownscaleTranscode(args)) return args;
+
+  const dropValueOptions = new Set([
+    '-vf',
+    '-preset:v',
+    '-profile:v',
+    '-tune:v',
+    '-level',
+    '-level:v',
+    '-vsync',
+    '-r:v',
+    '-sc_threshold',
+    '-g',
+    '-keyint_min',
+    '-pix_fmt',
+    '-b:v',
+    '-maxrate',
+    '-bufsize',
+    '-force_key_frames',
+    '-force_key_frames:v'
+  ]);
+
+  const patched = [];
+  let insertedTag = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const value = args[i];
+    if (dropValueOptions.has(value)) {
+      i += 1;
+      continue;
+    }
+    if ((value === '-c:v' || value === '-codec:v') && i + 1 < args.length) {
+      patched.push(value, 'copy');
+      i += 1;
+      if (!insertedTag) {
+        patched.push('-tag:v', 'hvc1');
+        insertedTag = true;
+      }
+      continue;
+    }
+    patched.push(value);
+  }
+
+  const lowMemory = setOrInsertOption(patched, ['-threads'], '-threads', '1');
+  console.log('[ffmpeg-copy-fix] Prehrajto 4K HEVC low-memory stream-copy enabled (hvc1)');
+  return lowMemory;
+}
+
 function patchPrehrajtoSafariH264(args) {
   if (!isPrehrajtoSoftwareH264Transcode(args)) return args;
 
@@ -205,7 +259,8 @@ function patchPrehrajtoAudioResources(args) {
 function patchArgs(command, args) {
   if (!isFfmpegCommand(command) || !Array.isArray(args)) return args;
 
-  let patchedArgs = patchPrehrajtoSafariH264(args);
+  let patchedArgs = patchPrehrajto4kHevcStreamCopy(args);
+  patchedArgs = patchPrehrajtoSafariH264(patchedArgs);
   patchedArgs = patchPrehrajtoAudioResources(patchedArgs);
   let usesVideoCopy = false;
   for (let i = 0; i < patchedArgs.length - 1; i += 1) {
