@@ -1,4 +1,6 @@
 const childProcess = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { syncBuiltinESMExports } = require('node:module');
 
@@ -7,6 +9,102 @@ const originalSpawnSyncExport = childProcess.spawnSync;
 const originalChildSpawn = childProcess.ChildProcess.prototype.spawn;
 let mediaRuntimeChild = null;
 
+const mediaRuntimeLockPath = path.join(os.tmpdir(), 'nuvioweb-media-runtime.pid');
+let ownsMediaRuntimeLock = false;
+
+function isMediaRuntimePath(value) {
+  return /(?:^|[\\/])services[\\/]webos[\\/]runtime[\\/]media-http\.cjs$/i.test(
+    String(value || '')
+  );
+}
+
+function isCurrentProcessMediaRuntime() {
+  return process.argv.some((arg) => isMediaRuntimePath(arg));
+}
+
+function isPidAlive(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) return false;
+  try {
+    process.kill(numericPid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+function readLockedPid() {
+  try {
+    return Number(String(fs.readFileSync(mediaRuntimeLockPath, 'utf8') || '').trim());
+  } catch (_) {
+    return 0;
+  }
+}
+
+function removeOwnedRuntimeLock() {
+  if (!ownsMediaRuntimeLock) return;
+  try {
+    const lockedPid = readLockedPid();
+    if (lockedPid === process.pid) {
+      fs.unlinkSync(mediaRuntimeLockPath);
+    }
+  } catch (_) {
+    // Best effort cleanup. A stale lock is detected on the next process start.
+  }
+  ownsMediaRuntimeLock = false;
+}
+
+function acquireMediaRuntimeLock() {
+  if (!isCurrentProcessMediaRuntime()) return;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = fs.openSync(mediaRuntimeLockPath, 'wx');
+      try {
+        fs.writeFileSync(fd, String(process.pid));
+      } finally {
+        fs.closeSync(fd);
+      }
+      ownsMediaRuntimeLock = true;
+      console.log(`[media-runtime-lock] acquired pid=${process.pid}`);
+      process.once('exit', removeOwnedRuntimeLock);
+      process.once('SIGINT', () => {
+        removeOwnedRuntimeLock();
+        process.exit(130);
+      });
+      process.once('SIGTERM', () => {
+        removeOwnedRuntimeLock();
+        process.exit(143);
+      });
+      return;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') {
+        console.warn(`[media-runtime-lock] lock error: ${error?.message || error}`);
+        return;
+      }
+
+      const lockedPid = readLockedPid();
+      if (lockedPid && lockedPid !== process.pid && isPidAlive(lockedPid)) {
+        console.log(
+          `[media-runtime-lock] duplicate runtime suppressed pid=${process.pid} owner=${lockedPid}`
+        );
+        process.exit(0);
+      }
+
+      try {
+        fs.unlinkSync(mediaRuntimeLockPath);
+      } catch (_) {
+        // Retry once; if another process won the race it will be handled above.
+      }
+    }
+  }
+
+  console.warn('[media-runtime-lock] could not acquire runtime lock; exiting duplicate process');
+  process.exit(0);
+}
+
+acquireMediaRuntimeLock();
+
 function isFfmpegCommand(command) {
   const base = path.basename(String(command || '')).toLowerCase();
   return base === 'ffmpeg' || base === 'ffmpeg.exe';
@@ -14,17 +112,18 @@ function isFfmpegCommand(command) {
 
 function isMediaRuntimeLaunch(command, args) {
   const executable = path.basename(String(command || '')).toLowerCase();
-  const isNode = executable === 'node' || executable === 'node.exe' || String(command || '') === process.execPath;
+  const isNode =
+    executable === 'node' || executable === 'node.exe' || String(command || '') === process.execPath;
   if (!isNode || !Array.isArray(args)) return false;
-  return args.some((arg) => /(?:^|[\\/])services[\\/]webos[\\/]runtime[\\/]media-http\.cjs$/i.test(String(arg || '')));
+  return args.some((arg) => isMediaRuntimePath(arg));
 }
 
 function hasLiveMediaRuntime() {
   return Boolean(
     mediaRuntimeChild &&
-    mediaRuntimeChild.exitCode == null &&
-    mediaRuntimeChild.signalCode == null &&
-    !mediaRuntimeChild.killed
+      mediaRuntimeChild.exitCode == null &&
+      mediaRuntimeChild.signalCode == null &&
+      !mediaRuntimeChild.killed
   );
 }
 
@@ -34,7 +133,9 @@ function argValue(args, name) {
 }
 
 function hasArgValue(args, names, expected) {
-  return names.some((name) => String(argValue(args, name)).toLowerCase() === String(expected).toLowerCase());
+  return names.some(
+    (name) => String(argValue(args, name)).toLowerCase() === String(expected).toLowerCase()
+  );
 }
 
 function setOrInsertOption(args, names, preferredName, value, insertAfterIndex = -1) {
@@ -46,7 +147,8 @@ function setOrInsertOption(args, names, preferredName, value, insertAfterIndex =
       return output;
     }
   }
-  const insertAt = insertAfterIndex >= 0 ? Math.min(output.length, insertAfterIndex + 1) : output.length;
+  const insertAt =
+    insertAfterIndex >= 0 ? Math.min(output.length, insertAfterIndex + 1) : output.length;
   output.splice(insertAt, 0, preferredName, value);
   return output;
 }
@@ -56,10 +158,7 @@ function isPrehrajtoProxyInput(args) {
 }
 
 function isPrehrajtoSoftwareH264Transcode(args) {
-  return (
-    isPrehrajtoProxyInput(args) &&
-    hasArgValue(args, ['-c:v', '-codec:v'], 'libx264')
-  );
+  return isPrehrajtoProxyInput(args) && hasArgValue(args, ['-c:v', '-codec:v'], 'libx264');
 }
 
 function patchPrehrajtoSafariH264(args) {
