@@ -30,6 +30,7 @@ globalThis.fetch = async function providerCompatibleFetch(input, init = {}) {
   const originalHeaders =
     init?.headers || (typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined);
   const headers = new Headers(originalHeaders || {});
+  const method = String(init?.method || (typeof Request !== "undefined" && input instanceof Request ? input.method : "GET") || "GET").toUpperCase();
 
   // Prehraj.to's public client intentionally uses a browser UA and Czech
   // Accept-Language. ffprobe/ffmpeg otherwise inject Lavf as the UA when they
@@ -38,9 +39,18 @@ globalThis.fetch = async function providerCompatibleFetch(input, init = {}) {
   headers.set("User-Agent", BROWSER_USER_AGENT);
   if (!headers.has("Accept-Language")) headers.set("Accept-Language", ACCEPT_LANGUAGE);
   if (!headers.has("Accept")) headers.set("Accept", "*/*");
+  if (!headers.has("Accept-Encoding")) headers.set("Accept-Encoding", "identity");
+
+  // PremiumCDN is much more reliable when media is requested as a byte-range.
+  // ffprobe sometimes opens the URL without Range first, which can leave the
+  // proxy waiting for the first body chunk and stall HLS startup indefinitely.
+  if (method === "GET" && !headers.has("Range")) {
+    headers.set("Range", "bytes=0-");
+  }
 
   return nativeFetch(input, {
     ...init,
+    method,
     headers
   });
 };
