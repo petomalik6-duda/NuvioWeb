@@ -26,11 +26,10 @@
     "lint:home:incremental": "eslint \"js/ui/screens/home/**/*.js\" \"eslint.config.mjs\"",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "serve": "node ./scripts/serve.mjs"
+    "serve": "node --import ./services/browser-media-proxy/provider-fetch-headers.mjs ./scripts/serve.mjs"
   },
   "devDependencies": {
     "@csstools/postcss-global-data": "^4.0.0",
-    "@eslint/js": "^9.39.4",
     "autoprefixer": "^10.4.27",
     "core-js": "3.49.0",
     "core-js-compat": "3.49.0",
