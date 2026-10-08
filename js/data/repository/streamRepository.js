@@ -46,6 +46,40 @@ function prepareYouTubeIdPlaybackStream(stream = {}) {
   };
 }
 
+function resolveAddonPlaybackUrl(value = "", baseUrl = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  // Already absolute (http/https, magnet, data, etc.). Keep the provider's
+  // locator exactly as supplied.
+  try {
+    // eslint-disable-next-line no-new
+    new URL(raw);
+    return raw;
+  } catch (_) {
+    // Relative addon playback URLs are valid in practice (notably older
+    // FastShare `/play/<token>` bridges), but external iOS players require a
+    // fully-qualified transferable URL.
+  }
+
+  const cleanBaseUrl = addonRepository.canonicalizeUrl(baseUrl);
+  if (!cleanBaseUrl) return raw;
+
+  try {
+    const base = new URL(cleanBaseUrl);
+    if (raw.startsWith("//")) {
+      return `${base.protocol}${raw}`;
+    }
+    if (raw.startsWith("/")) {
+      return new URL(raw, `${base.protocol}//${base.host}`).href;
+    }
+    const relativeBase = cleanBaseUrl.endsWith("/") ? cleanBaseUrl : `${cleanBaseUrl}/`;
+    return new URL(raw, relativeBase).href;
+  } catch (_) {
+    return raw;
+  }
+}
+
 class StreamRepository {
   async getStreamsFromAddon(baseUrl, type, videoId) {
     const url = this.buildStreamUrl(baseUrl, type, videoId);
@@ -56,7 +90,7 @@ class StreamRepository {
 
     const streams = await Promise.all(
       (result.data?.streams || []).map((stream) =>
-        prepareBrowserMediaProxyStream(this.mapStream(stream))
+        prepareBrowserMediaProxyStream(this.mapStream(stream, baseUrl))
       )
     );
     return { status: "success", data: streams };
@@ -305,26 +339,33 @@ class StreamRepository {
     return encodeURIComponent(String(value || "")).replace(/\+/g, "%20");
   }
 
-  mapStream(stream = {}) {
+  mapStream(stream = {}, baseUrl = "") {
     const sidecarSubtitles = Array.isArray(stream.subtitles)
       ? stream.subtitles
           .filter((entry) => entry && entry.url)
           .map((entry) => ({
             id: entry.id || null,
-            url: entry.url,
+            url: resolveAddonPlaybackUrl(entry.url, baseUrl) || entry.url,
             lang: entry.lang || "unknown"
           }))
       : [];
+
+    const directExternalUrl =
+      stream.externalUrl ||
+      stream.directUrl ||
+      stream.behaviorHints?.externalUrl ||
+      stream.behaviorHints?.directUrl ||
+      null;
 
     return prepareYouTubeIdPlaybackStream({
       name: stream.name || null,
       title: stream.title || null,
       description: stream.description || null,
-      url: stream.url || null,
+      url: resolveAddonPlaybackUrl(stream.url, baseUrl) || null,
       ytId: stream.ytId || null,
       infoHash: stream.infoHash || null,
       fileIdx: stream.fileIdx ?? null,
-      externalUrl: stream.externalUrl || null,
+      externalUrl: resolveAddonPlaybackUrl(directExternalUrl, baseUrl) || null,
       behaviorHints: stream.behaviorHints || null,
       sources: Array.isArray(stream.sources) ? stream.sources : [],
       quality: stream.quality || null,
@@ -376,7 +417,7 @@ class StreamRepository {
 
       const mapped = await Promise.all(
         streams
-          .map((stream) => this.mapStream(stream))
+          .map((stream) => this.mapStream(stream, addon.baseUrl))
           .filter(
             (stream) =>
               stream.url ||
