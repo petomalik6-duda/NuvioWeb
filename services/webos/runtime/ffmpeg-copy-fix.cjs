@@ -37,17 +37,28 @@ function hasArgValue(args, names, expected) {
   return names.some((name) => String(argValue(args, name)).toLowerCase() === String(expected).toLowerCase());
 }
 
-function setOrInsertOption(args, names, preferredName, value, insertAfterIndex = -1) {
-  const output = [...args];
+function removeOptionPair(args, names) {
   const nameSet = new Set(names);
+  const output = [];
+  for (let i = 0; i < args.length; i += 1) {
+    if (nameSet.has(args[i])) {
+      i += 1;
+      continue;
+    }
+    output.push(args[i]);
+  }
+  return output;
+}
+
+function replaceOptionValue(args, names, value) {
+  const nameSet = new Set(names);
+  const output = [...args];
   for (let i = 0; i < output.length - 1; i += 1) {
     if (nameSet.has(output[i])) {
       output[i + 1] = value;
       return output;
     }
   }
-  const insertAt = insertAfterIndex >= 0 ? Math.min(output.length, insertAfterIndex + 1) : output.length;
-  output.splice(insertAt, 0, preferredName, value);
   return output;
 }
 
@@ -55,47 +66,51 @@ function isPrehrajtoProxyInput(args) {
   return args.some((arg) => /\/api\/media-proxy\/play\//i.test(String(arg || '')));
 }
 
-function isPrehrajtoSoftwareH264Transcode(args) {
-  return (
-    isPrehrajtoProxyInput(args) &&
-    hasArgValue(args, ['-c:v', '-codec:v'], 'libx264')
-  );
+function looksLikePrehrajto4kSoftwareTranscode(args) {
+  if (!isPrehrajtoProxyInput(args)) return false;
+  if (!hasArgValue(args, ['-c:v', '-codec:v'], 'libx264')) return false;
+  const filter = String(argValue(args, '-vf') || '');
+  return /(?:^|,)scale=1920:-2(?::|,|$)/i.test(filter);
 }
 
-function patchPrehrajtoSafariH264(args) {
-  if (!isPrehrajtoSoftwareH264Transcode(args)) return args;
+function patchPrehrajto4kVideoRemux(args) {
+  if (!looksLikePrehrajto4kSoftwareTranscode(args)) return args;
 
   let patched = [...args];
-  const codecIndex = patched.findIndex(
-    (value, index) =>
-      index < patched.length - 1 &&
-      (value === '-c:v' || value === '-codec:v') &&
-      String(patched[index + 1] || '').toLowerCase() === 'libx264'
-  );
-
-  patched = setOrInsertOption(
-    patched,
-    ['-pix_fmt'],
-    '-pix_fmt',
-    'yuv420p',
-    codecIndex >= 0 ? codecIndex + 1 : -1
-  );
-  patched = setOrInsertOption(
-    patched,
-    ['-level', '-level:v'],
+  patched = removeOptionPair(patched, ['-vf']);
+  patched = replaceOptionValue(patched, ['-c:v', '-codec:v'], 'copy');
+  patched = removeOptionPair(patched, [
+    '-preset:v',
+    '-profile:v',
+    '-tune:v',
+    '-level',
     '-level:v',
-    '41',
-    codecIndex >= 0 ? codecIndex + 1 : -1
-  );
+    '-vsync',
+    '-r:v',
+    '-sc_threshold',
+    '-g',
+    '-keyint_min',
+    '-force_key_frames:v',
+    '-force_key_frames'
+  ]);
 
-  console.log('[ffmpeg-copy-fix] Prehrajto H264 Safari output: yuv420p level 4.1');
+  const codecIndex = patched.findIndex((value, index) =>
+    index < patched.length - 1 &&
+    (value === '-c:v' || value === '-codec:v') &&
+    String(patched[index + 1] || '').toLowerCase() === 'copy'
+  );
+  if (codecIndex >= 0) {
+    patched.splice(codecIndex + 2, 0, '-tag:v', 'hvc1');
+  }
+
+  console.log('[ffmpeg-copy-fix] Prehrajto 4K video remux enabled: HEVC copy + hvc1');
   return patched;
 }
 
 function patchArgs(command, args) {
   if (!isFfmpegCommand(command) || !Array.isArray(args)) return args;
 
-  let patchedArgs = patchPrehrajtoSafariH264(args);
+  let patchedArgs = patchPrehrajto4kVideoRemux(args);
   let usesVideoCopy = false;
   for (let i = 0; i < patchedArgs.length - 1; i += 1) {
     if (
