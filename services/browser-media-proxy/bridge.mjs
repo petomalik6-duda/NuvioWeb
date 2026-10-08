@@ -1,10 +1,7 @@
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
 
-const ALLOWED_MEDIA_HOSTS = new Set([
-  "prehrajto.streamstr.stream",
-  "cdn.streamstr.stream"
-]);
+const ALLOWED_MEDIA_ROOT = "streamstr.stream";
 const TOKEN_TTL_MS = Math.max(
   5 * 60 * 1000,
   Number(process.env.NUVIO_MEDIA_PROXY_TOKEN_TTL_MS || 2 * 60 * 60 * 1000)
@@ -26,7 +23,11 @@ const forbiddenForwardHeaders = new Set([
 export function isAllowedBrowserMediaUrl(value = "") {
   try {
     const parsed = new URL(String(value || ""));
-    return parsed.protocol === "https:" && ALLOWED_MEDIA_HOSTS.has(parsed.hostname.toLowerCase());
+    const hostname = parsed.hostname.toLowerCase();
+    return (
+      parsed.protocol === "https:" &&
+      (hostname === ALLOWED_MEDIA_ROOT || hostname.endsWith(`.${ALLOWED_MEDIA_ROOT}`))
+    );
   } catch (_) {
     return false;
   }
@@ -303,12 +304,16 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
     return token;
   };
 
-  const playbackPath = (token, filename = "media") =>
-    `/api/media-proxy/play/${encodeURIComponent(token)}/${encodeURIComponent(
+  const playbackPath = (token, filename = "media", { raw = false } = {}) => {
+    const base = `/api/media-proxy/play/${encodeURIComponent(token)}/${encodeURIComponent(
       sanitizeBrowserMediaFilename(filename)
     )}`;
+    return raw ? `${base}?__nuvio_raw=1` : base;
+  };
 
-  const registerResolvedUrl = (url, parentEntry) => {
+  const hlsPlaybackPath = (token) => `/api/media-hls/${encodeURIComponent(token)}/master.m3u8`;
+
+  const registerResolvedUrl = (url, parentEntry, { raw = false } = {}) => {
     const filename = (() => {
       try {
         return decodeURIComponent(new URL(url).pathname.split("/").pop() || "media");
@@ -317,11 +322,12 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
       }
     })();
     const token = rememberTarget(url, parentEntry.requestHeaders, filename);
-    return token ? playbackPath(token, filename) : url;
+    return token ? playbackPath(token, filename, { raw }) : url;
   };
 
   return async function browserMediaProxyHandler(request, response) {
     const requestUrl = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    const rawPlaybackRequest = requestUrl.searchParams.get("__nuvio_raw") === "1";
 
     if (request.method === "OPTIONS") {
       // Same-origin browser requests do not need CORS. Omitting ACAO here keeps
@@ -361,7 +367,8 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
       }
       writeJson(response, 200, {
         ok: true,
-        playbackUrl: playbackPath(token, filename)
+        playbackUrl: hlsPlaybackPath(token),
+        nativePlaybackUrl: playbackPath(token, filename)
       });
       return true;
     }
@@ -403,6 +410,11 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
         String(request.headers["user-agent"] || "").trim() || "NuvioWeb Media Proxy";
     }
 
+    let initialProviderHost = "unknown";
+    try {
+      initialProviderHost = new URL(entry.url).hostname;
+    } catch (_) {}
+
     let result;
     try {
       result = await fetchWithAllowedRedirects(fetchImpl, entry.url, {
@@ -410,6 +422,11 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
         headers: upstreamHeaders
       });
     } catch (error) {
+      console.warn(
+        `[media-proxy] provider-request-failed host=${initialProviderHost} reason=${
+          String(error?.message || "request-failed").replace(/\s+/g, " ").slice(0, 120)
+        }`
+      );
       writeJson(response, 502, {
         error: "Media provider request failed",
         detail: String(error?.message || error || "")
@@ -420,6 +437,13 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
     const { upstream, finalUrl } = result;
     const contentType = String(upstream.headers.get("content-type") || "");
     if (contentType.toLowerCase().includes("text/html")) {
+      let providerHost = initialProviderHost;
+      try {
+        providerHost = new URL(finalUrl).hostname;
+      } catch (_) {}
+      console.warn(
+        `[media-proxy] provider-html host=${providerHost} status=${Number(upstream.status || 0)}`
+      );
       upstream.body?.cancel?.().catch?.(() => {});
       writeJson(response, 502, {
         error: "Media provider returned a browser verification page instead of video",
@@ -461,7 +485,7 @@ export function createBrowserMediaProxyHandler({ fetchImpl = globalThis.fetch } 
     if (isHlsResponse(finalUrl, contentType)) {
       const playlistText = await upstream.text();
       const rewritten = rewriteBrowserMediaHlsPlaylist(playlistText, finalUrl, (url) =>
-        registerResolvedUrl(url, entry)
+        registerResolvedUrl(url, entry, { raw: rawPlaybackRequest })
       );
       const playlistHeaders = {
         ...baseHeaders,
