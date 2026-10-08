@@ -8,6 +8,44 @@ import { TmdbService } from "../../core/tmdb/tmdbService.js";
 import { LocalDebridAvailabilityService } from "../../core/debrid/localDebridAvailabilityService.js";
 import { DebridStreamPresentation } from "../../core/debrid/directDebridStreamPresentation.js";
 
+const YOUTUBE_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
+
+function normalizeYouTubeId(value = "") {
+  const id = String(value || "").trim();
+  return YOUTUBE_ID_PATTERN.test(id) ? id : "";
+}
+
+function prepareYouTubeIdPlaybackStream(stream = {}) {
+  const ytId = normalizeYouTubeId(stream?.ytId);
+  if (!ytId) return stream;
+
+  // Match NuvioMobile 0.5.8: ytId is a resolver source only when the addon did
+  // not provide another playable locator. Direct/debrid/torrent sources retain
+  // their existing playback path.
+  const hasOtherSource = Boolean(
+    String(stream?.url || "").trim() ||
+      String(stream?.externalUrl || "").trim() ||
+      String(stream?.infoHash || "").trim() ||
+      stream?.clientResolve
+  );
+  if (hasOtherSource) return stream;
+
+  const behaviorHints = {
+    ...(stream?.behaviorHints || {}),
+    notWebReady: false,
+    nuvioYouTubeResolver: true
+  };
+
+  return {
+    ...stream,
+    ytId,
+    url: `/api/youtube-stream/${encodeURIComponent(ytId)}/master.m3u8`,
+    mimeType: "application/vnd.apple.mpegurl",
+    sourceType: "application/vnd.apple.mpegurl",
+    behaviorHints
+  };
+}
+
 class StreamRepository {
   async getStreamsFromAddon(baseUrl, type, videoId) {
     const url = this.buildStreamUrl(baseUrl, type, videoId);
@@ -224,7 +262,9 @@ class StreamRepository {
         },
         streams: await Promise.all(
           (result.streams || []).map(async (stream) => {
-            const preparedStream = await prepareBrowserMediaProxyStream(stream);
+            const preparedStream = await prepareBrowserMediaProxyStream(
+              prepareYouTubeIdPlaybackStream(stream)
+            );
             return {
               ...preparedStream,
               sourceProviderId: result.sourceId || result.sourceName || null,
@@ -276,7 +316,7 @@ class StreamRepository {
           }))
       : [];
 
-    return {
+    return prepareYouTubeIdPlaybackStream({
       name: stream.name || null,
       title: stream.title || null,
       description: stream.description || null,
@@ -292,7 +332,7 @@ class StreamRepository {
       clientResolve: stream.clientResolve || null,
       debridCacheStatus: stream.debridCacheStatus || null,
       subtitles: sidecarSubtitles
-    };
+    });
   }
 
   async fetchInlineStreamsFromMeta(addon, type, videoId) {
