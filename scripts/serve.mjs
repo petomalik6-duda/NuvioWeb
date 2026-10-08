@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { buildRuntimeEnvScript, readEnvProperties } from "./envProperties.mjs";
 import { createDebridApiBridgeHandler } from "../services/debrid-api-bridge/bridge.mjs";
 import { createExternalReturnHandler } from "../services/external-return-bridge/bridge.mjs";
-import { createBrowserMediaProxyHandler } from "../services/browser-media-proxy/bridge.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -18,12 +16,10 @@ const port = Number(process.env.PORT || 4173);
 const mediaRuntimePath = path.join(rootDir, "services", "webos", "runtime", "media-http.cjs");
 const mediaServerPorts = [2710, 2711, 2712, 2713, 2714];
 const mediaProbeTimeoutMs = 1200;
-const mediaHlsTimeoutMs = Math.max(15000, Number(process.env.NUVIO_MEDIA_HLS_TIMEOUT_MS || 60000));
 let mediaRuntimeProcess = null;
 let cachedMediaServerPort = mediaServerPorts[0];
 const debridApiBridgeHandler = createDebridApiBridgeHandler();
 const externalReturnHandler = createExternalReturnHandler();
-const browserMediaProxyHandler = createBrowserMediaProxyHandler();
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -32,8 +28,6 @@ const mimeTypes = {
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".m3u8": "application/vnd.apple.mpegurl",
-  ".m4s": "video/mp4",
-  ".vtt": "text/vtt; charset=utf-8",
   ".webmanifest": "application/manifest+json; charset=utf-8",
   ".mp4": "video/mp4",
   ".png": "image/png",
@@ -199,181 +193,6 @@ async function proxyLocalMediaRequest(request, response, pathname) {
   return true;
 }
 
-function getMediaProxyPlaybackToken(pathname) {
-  const match = String(pathname || "").match(/^\/api\/media-proxy\/play\/([^/]+)(?:\/.*)?$/);
-  if (!match) {
-    return "";
-  }
-  try {
-    return decodeURIComponent(match[1] || "");
-  } catch (_) {
-    return "";
-  }
-}
-
-function isAllowedMediaHlsTail(value) {
-  const tail = String(value || "");
-  return (
-    tail === "master.m3u8" ||
-    /^(?:video|audio|subtitle)\d+\.m3u8$/.test(tail) ||
-    /^(?:video|audio)\d+\/init\.mp4$/.test(tail) ||
-    /^(?:video|audio|subtitle)\d+\/segment\d+\.(?:m4s|vtt)$/.test(tail)
-  );
-}
-
-function mediaHlsPublicPath(token, tail = "master.m3u8") {
-  return `/api/media-hls/${encodeURIComponent(token)}/${tail}`;
-}
-
-function mediaHlsRuntimeId(token) {
-  return crypto.createHash("sha256").update(`browser-prehrajto:${token}`).digest("hex").slice(0, 24);
-}
-
-function buildMediaHlsRuntimePath(token, tail) {
-  const rawSourceUrl = new URL(
-    `/api/media-proxy/play/${encodeURIComponent(token)}/media`,
-    `http://127.0.0.1:${port}`
-  );
-  rawSourceUrl.searchParams.set("__nuvio_raw", "1");
-
-  const query = new URLSearchParams({
-    mediaURL: rawSourceUrl.toString(),
-    forceTranscoding: "1",
-    maxAudioChannels: "2"
-  });
-  return `/hlsv2/${mediaHlsRuntimeId(token)}/${tail}?${query.toString()}`;
-}
-
-function writeMediaHlsUnavailable(response, statusCode, detail = "") {
-  response.writeHead(statusCode, {
-    "Cache-Control": "no-store",
-    "Content-Type": "application/json; charset=utf-8"
-  });
-  response.end(
-    JSON.stringify({
-      error: "Prehrajto HLS playback unavailable",
-      ...(detail ? { detail } : {})
-    })
-  );
-}
-
-async function proxyMediaHlsRequest(request, response, token, tail) {
-  if (!token || !isAllowedMediaHlsTail(tail)) {
-    writeMediaHlsUnavailable(response, 404);
-    return true;
-  }
-
-  const mediaPort = (await findLocalMediaServerPort()) || (await ensureLocalMediaRuntime());
-  if (!mediaPort) {
-    writeMediaHlsUnavailable(response, 503, "Local media runtime is not available");
-    return true;
-  }
-
-  const runtimePath = buildMediaHlsRuntimePath(token, tail);
-  const isPlaylist = tail.endsWith(".m3u8");
-
-  if (isPlaylist) {
-    try {
-      const proxied = await requestLocalMediaPath(mediaPort, runtimePath, {
-        method: "GET",
-        timeoutMs: mediaHlsTimeoutMs
-      });
-      let body = proxied.body;
-      const contentType = String(
-        proxied.headers["content-type"] || "application/vnd.apple.mpegurl"
-      );
-
-      if (proxied.statusCode >= 200 && proxied.statusCode < 300) {
-        const publicBase = mediaHlsPublicPath(token, "");
-        const runtimeId = mediaHlsRuntimeId(token);
-        const text = body
-          .toString("utf8")
-          .replaceAll(`http://127.0.0.1:${mediaPort}/hlsv2/${runtimeId}/`, publicBase)
-          .replaceAll(`http://localhost:${mediaPort}/hlsv2/${runtimeId}/`, publicBase);
-        body = Buffer.from(text, "utf8");
-      }
-
-      response.writeHead(proxied.statusCode || 502, {
-        "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "private, no-store",
-        "Content-Length": body.length,
-        "Content-Type": contentType
-      });
-      if (request.method === "HEAD") {
-        response.end();
-      } else {
-        response.end(body);
-      }
-      return true;
-    } catch (error) {
-      writeMediaHlsUnavailable(response, 502, String(error?.message || error || ""));
-      return true;
-    }
-  }
-
-  await new Promise((resolve) => {
-    let responded = false;
-    const upstreamRequest = http.request(
-      {
-        host: "127.0.0.1",
-        port: mediaPort,
-        path: runtimePath,
-        method: "GET",
-        headers: {
-          Accept: String(request.headers.accept || "*/*")
-        }
-      },
-      (upstreamResponse) => {
-        responded = true;
-        const headers = {
-          "Access-Control-Allow-Origin": "*",
-          "Cache-Control": "private, no-store",
-          "Content-Type":
-            upstreamResponse.headers["content-type"] || getContentType(tail)
-        };
-        if (upstreamResponse.headers["content-length"]) {
-          headers["Content-Length"] = upstreamResponse.headers["content-length"];
-        }
-        response.writeHead(upstreamResponse.statusCode || 502, headers);
-        if (request.method === "HEAD") {
-          upstreamResponse.resume();
-          response.end();
-          resolve();
-          return;
-        }
-        upstreamResponse.pipe(response);
-        upstreamResponse.on("end", resolve);
-        upstreamResponse.on("error", () => {
-          if (!response.writableEnded) response.end();
-          resolve();
-        });
-      }
-    );
-
-    upstreamRequest.setTimeout(mediaHlsTimeoutMs, () => {
-      upstreamRequest.destroy(new Error(`HLS media request timed out after ${mediaHlsTimeoutMs}ms`));
-    });
-    upstreamRequest.on("error", (error) => {
-      if (!responded && !response.headersSent) {
-        writeMediaHlsUnavailable(response, 502, String(error?.message || error || ""));
-      } else if (!response.writableEnded) {
-        response.end();
-      }
-      resolve();
-    });
-    request.on("aborted", () => {
-      upstreamRequest.destroy();
-    });
-    response.on("close", () => {
-      if (!response.writableEnded) {
-        upstreamRequest.destroy();
-      }
-    });
-    upstreamRequest.end();
-  });
-  return true;
-}
-
 const server = http.createServer(async (request, response) => {
   try {
     const requestUrl = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
@@ -384,46 +203,6 @@ const server = http.createServer(async (request, response) => {
     if (requestUrl.pathname.startsWith("/api/external-return/")) {
       externalReturnHandler(request, response);
       return;
-    }
-
-    const hlsMatch = requestUrl.pathname.match(/^\/api\/media-hls\/([^/]+)\/(.+)$/);
-    if (hlsMatch) {
-      if (request.method !== "GET" && request.method !== "HEAD") {
-        response.writeHead(405, {
-          "Cache-Control": "no-store",
-          "Content-Type": "application/json; charset=utf-8"
-        });
-        response.end(JSON.stringify({ error: "Method not allowed" }));
-        return;
-      }
-      let token = "";
-      let tail = "";
-      try {
-        token = decodeURIComponent(hlsMatch[1] || "");
-        tail = decodeURIComponent(hlsMatch[2] || "");
-      } catch (_) {
-        writeMediaHlsUnavailable(response, 400, "Invalid HLS path");
-        return;
-      }
-      await proxyMediaHlsRequest(request, response, token, tail);
-      return;
-    }
-
-    if (requestUrl.pathname.startsWith("/api/media-proxy/")) {
-      const playbackToken = getMediaProxyPlaybackToken(requestUrl.pathname);
-      const rawPlayback = requestUrl.searchParams.get("__nuvio_raw") === "1";
-      if (playbackToken && !rawPlayback) {
-        response.writeHead(307, {
-          "Cache-Control": "no-store",
-          Location: mediaHlsPublicPath(playbackToken)
-        });
-        response.end();
-        return;
-      }
-      const handled = await browserMediaProxyHandler(request, response);
-      if (handled) {
-        return;
-      }
     }
     if (requestUrl.pathname === "/nuvio.env.js") {
       const { env } = await readEnvProperties({ rootDir });
