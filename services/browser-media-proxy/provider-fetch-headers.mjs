@@ -13,6 +13,9 @@ const GENERIC_CONTENT_TYPES = new Set([
   "application/download"
 ]);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const RESOLVED_PROVIDER_URL_TTL_MS = 15 * 60 * 1000;
+const RESOLVED_PROVIDER_URL_MAX = 2000;
+const resolvedProviderUrls = new Map();
 
 function hostnameMatchesRoot(hostname, root) {
   return hostname === root || hostname.endsWith(`.${root}`);
@@ -39,6 +42,10 @@ function isControlledHttpStreamstrUrl(value = "") {
   } catch (_) {
     return false;
   }
+}
+
+function isAllowedResolvedProviderUrl(value = "") {
+  return isProviderUrl(value) || isControlledHttpStreamstrUrl(value);
 }
 
 function resolveRedirectUrl(response, currentUrl) {
@@ -80,6 +87,91 @@ function withImmediateStreamingMime(response) {
     statusText: response.statusText,
     headers
   });
+}
+
+function cleanupResolvedProviderUrls(now = Date.now()) {
+  for (const [key, entry] of resolvedProviderUrls.entries()) {
+    if (!entry || entry.expiresAt <= now) resolvedProviderUrls.delete(key);
+  }
+  while (resolvedProviderUrls.size > RESOLVED_PROVIDER_URL_MAX) {
+    resolvedProviderUrls.delete(resolvedProviderUrls.keys().next().value);
+  }
+}
+
+function getResolvedProviderUrl(originalUrl) {
+  cleanupResolvedProviderUrls();
+  const entry = resolvedProviderUrls.get(String(originalUrl || ""));
+  if (!entry || entry.expiresAt <= Date.now()) return "";
+  return isAllowedResolvedProviderUrl(entry.url) ? entry.url : "";
+}
+
+function rememberResolvedProviderUrl(originalUrl, resolvedUrl) {
+  const original = String(originalUrl || "");
+  const resolved = String(resolvedUrl || "");
+  if (!original || !resolved || original === resolved || !isAllowedResolvedProviderUrl(resolved)) return;
+  cleanupResolvedProviderUrls();
+  resolvedProviderUrls.set(original, {
+    url: resolved,
+    expiresAt: Date.now() + RESOLVED_PROVIDER_URL_TTL_MS
+  });
+}
+
+function forgetResolvedProviderUrl(originalUrl) {
+  resolvedProviderUrls.delete(String(originalUrl || ""));
+}
+
+async function fetchProviderWithStickyRedirects(originalUrl, init, method, headers, { useCache = true } = {}) {
+  const cachedUrl = useCache ? getResolvedProviderUrl(originalUrl) : "";
+  let currentUrl = cachedUrl || originalUrl;
+  const startedFromCache = Boolean(cachedUrl);
+
+  for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+    if (!isAllowedResolvedProviderUrl(currentUrl)) {
+      throw new Error("Provider redirect left the allowed domains");
+    }
+
+    const response = await nativeFetch(currentUrl, {
+      ...init,
+      method,
+      headers,
+      redirect: "manual"
+    });
+
+    if (!REDIRECT_STATUSES.has(Number(response.status || 0))) {
+      // A cached signed CDN URL can expire independently from the Nuvio proxy
+      // token. Retry the provider entry once so a new redirect chain can be
+      // learned without sending VLC back to a stale CDN URL forever.
+      if (startedFromCache && [401, 403, 404, 410].includes(Number(response.status || 0))) {
+        forgetResolvedProviderUrl(originalUrl);
+        response.body?.cancel?.().catch?.(() => {});
+        return fetchProviderWithStickyRedirects(originalUrl, init, method, headers, { useCache: false });
+      }
+
+      if (response.status >= 200 && response.status < 400 && currentUrl !== originalUrl) {
+        rememberResolvedProviderUrl(originalUrl, currentUrl);
+      }
+      return response;
+    }
+
+    const nextUrl = resolveRedirectUrl(response, currentUrl);
+    if (!nextUrl || !isAllowedResolvedProviderUrl(nextUrl)) {
+      return response;
+    }
+
+    let nextHost = "unknown";
+    try {
+      nextHost = new URL(nextUrl).hostname;
+    } catch (_) {}
+    if (isControlledHttpStreamstrUrl(nextUrl)) {
+      console.info(`[provider-fetch] controlled streamstr http redirect host=${nextHost}`);
+    } else {
+      console.info(`[provider-fetch] resolved provider redirect host=${nextHost}`);
+    }
+    response.body?.cancel?.().catch?.(() => {});
+    currentUrl = nextUrl;
+  }
+
+  throw new Error("Too many provider redirects");
 }
 
 // Node throws ERR_INVALID_STATE when code calls ReadableStream.cancel() after
@@ -133,34 +225,14 @@ globalThis.fetch = async function providerCompatibleFetch(input, init = {}) {
     headers.set("Range", "bytes=0-");
   }
 
-  let response = await nativeFetch(input, {
-    ...init,
-    method,
-    headers
-  });
-
-  // Some large/4K Prehraj.to objects intentionally redirect from their HTTPS
-  // entry URL to an HTTP URL on another *.streamstr.stream host. The media
-  // bridge rejects HTTP URLs before issuing a request, while forcing HTTPS on
-  // those storage hosts can fail certificate validation. Follow exactly one
-  // such provider-owned downgrade here, with manual redirects preserved, so a
-  // later redirect still returns to the bridge's normal domain allow-list.
-  if ((method === "GET" || method === "HEAD") && REDIRECT_STATUSES.has(Number(response.status))) {
-    const downgradeUrl = resolveRedirectUrl(response, url);
-    if (isControlledHttpStreamstrUrl(downgradeUrl)) {
-      let downgradeHost = "unknown";
-      try {
-        downgradeHost = new URL(downgradeUrl).hostname;
-      } catch (_) {}
-      console.info(`[provider-fetch] controlled streamstr http redirect host=${downgradeHost}`);
-      response = await nativeFetch(downgradeUrl, {
-        ...init,
-        method,
-        headers,
-        redirect: "manual"
-      });
-    }
-  }
+  const response =
+    method === "GET" || method === "HEAD"
+      ? await fetchProviderWithStickyRedirects(url, init, method, headers)
+      : await nativeFetch(input, {
+          ...init,
+          method,
+          headers
+        });
 
   return withImmediateStreamingMime(response);
 };
