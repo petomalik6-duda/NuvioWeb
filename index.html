@@ -8,6 +8,19 @@
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <script src="assets/runtime/legacy-features.js"></script>
+    <script>
+      (() => {
+        const ua = String(navigator.userAgent || "");
+        const platform = String(navigator.platform || "");
+        const isTouchMac = platform === "MacIntel" && Number(navigator.maxTouchPoints || 0) > 1;
+        const isIOS = /iPad|iPhone|iPod/i.test(ua) || isTouchMac;
+        if (!isIOS) return;
+        document.documentElement.classList.add("nuvio-ios-webkit");
+        if (window.matchMedia?.("(display-mode: standalone)")?.matches || navigator.standalone === true) {
+          document.documentElement.classList.add("nuvio-ios-standalone");
+        }
+      })();
+    </script>
     <meta name="theme-color" content="#0d0d0d" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
