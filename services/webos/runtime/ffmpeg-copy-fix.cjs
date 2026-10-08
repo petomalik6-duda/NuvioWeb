@@ -45,13 +45,18 @@ function removeOwnedRuntimeLock() {
   if (!ownsMediaRuntimeLock) return;
   try {
     const lockedPid = readLockedPid();
-    if (lockedPid === process.pid) fs.unlinkSync(mediaRuntimeLockPath);
-  } catch (_) {}
+    if (lockedPid === process.pid) {
+      fs.unlinkSync(mediaRuntimeLockPath);
+    }
+  } catch (_) {
+    // Best effort cleanup. A stale lock is detected on the next process start.
+  }
   ownsMediaRuntimeLock = false;
 }
 
 function acquireMediaRuntimeLock() {
   if (!isCurrentProcessMediaRuntime()) return;
+
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const fd = fs.openSync(mediaRuntimeLockPath, 'wx');
@@ -77,16 +82,23 @@ function acquireMediaRuntimeLock() {
         console.warn(`[media-runtime-lock] lock error: ${error?.message || error}`);
         return;
       }
+
       const lockedPid = readLockedPid();
       if (lockedPid && lockedPid !== process.pid && isPidAlive(lockedPid)) {
-        console.log(`[media-runtime-lock] duplicate runtime suppressed pid=${process.pid} owner=${lockedPid}`);
+        console.log(
+          `[media-runtime-lock] duplicate runtime suppressed pid=${process.pid} owner=${lockedPid}`
+        );
         process.exit(0);
       }
+
       try {
         fs.unlinkSync(mediaRuntimeLockPath);
-      } catch (_) {}
+      } catch (_) {
+        // Retry once; if another process won the race it will be handled above.
+      }
     }
   }
+
   console.warn('[media-runtime-lock] could not acquire runtime lock; exiting duplicate process');
   process.exit(0);
 }
@@ -100,13 +112,19 @@ function isFfmpegCommand(command) {
 
 function isMediaRuntimeLaunch(command, args) {
   const executable = path.basename(String(command || '')).toLowerCase();
-  const isNode = executable === 'node' || executable === 'node.exe' || String(command || '') === process.execPath;
+  const isNode =
+    executable === 'node' || executable === 'node.exe' || String(command || '') === process.execPath;
   if (!isNode || !Array.isArray(args)) return false;
   return args.some((arg) => isMediaRuntimePath(arg));
 }
 
 function hasLiveMediaRuntime() {
-  return Boolean(mediaRuntimeChild && mediaRuntimeChild.exitCode == null && mediaRuntimeChild.signalCode == null && !mediaRuntimeChild.killed);
+  return Boolean(
+    mediaRuntimeChild &&
+      mediaRuntimeChild.exitCode == null &&
+      mediaRuntimeChild.signalCode == null &&
+      !mediaRuntimeChild.killed
+  );
 }
 
 function argValue(args, name) {
@@ -115,7 +133,9 @@ function argValue(args, name) {
 }
 
 function hasArgValue(args, names, expected) {
-  return names.some((name) => String(argValue(args, name)).toLowerCase() === String(expected).toLowerCase());
+  return names.some(
+    (name) => String(argValue(args, name)).toLowerCase() === String(expected).toLowerCase()
+  );
 }
 
 function setOrInsertOption(args, names, preferredName, value, insertAfterIndex = -1) {
@@ -127,7 +147,8 @@ function setOrInsertOption(args, names, preferredName, value, insertAfterIndex =
       return output;
     }
   }
-  const insertAt = insertAfterIndex >= 0 ? Math.min(output.length, insertAfterIndex + 1) : output.length;
+  const insertAt =
+    insertAfterIndex >= 0 ? Math.min(output.length, insertAfterIndex + 1) : output.length;
   output.splice(insertAt, 0, preferredName, value);
   return output;
 }
@@ -140,50 +161,33 @@ function isPrehrajtoSoftwareH264Transcode(args) {
   return isPrehrajtoProxyInput(args) && hasArgValue(args, ['-c:v', '-codec:v'], 'libx264');
 }
 
-function isPrehrajto4kSoftwareTranscode(args) {
-  if (!isPrehrajtoSoftwareH264Transcode(args)) return false;
-  for (let i = 0; i < args.length - 1; i += 1) {
-    if ((args[i] === '-vf' || args[i] === '-filter:v') && /(?:^|,)scale=1920:-2(?:[:,]|$)/i.test(String(args[i + 1] || ''))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function patchPrehrajto4kHevcCopy(args) {
-  if (!isPrehrajto4kSoftwareTranscode(args)) return args;
-
-  const removeValueOptions = new Set([
-    '-vf', '-filter:v', '-pix_fmt', '-preset:v', '-profile:v', '-tune:v', '-level', '-level:v',
-    '-vsync', '-r:v', '-sc_threshold', '-g', '-keyint_min', '-b:v', '-maxrate', '-bufsize', '-crf',
-    '-force_key_frames:v', '-force_key_frames', '-tag:v'
-  ]);
-
-  const output = [];
-  for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i];
-    if (removeValueOptions.has(arg)) {
-      i += 1;
-      continue;
-    }
-    if ((arg === '-c:v' || arg === '-codec:v') && i + 1 < args.length && String(args[i + 1] || '').toLowerCase() === 'libx264') {
-      output.push('-c:v', 'copy', '-tag:v', 'hvc1');
-      i += 1;
-      continue;
-    }
-    output.push(arg);
-  }
-  console.log('[ffmpeg-copy-fix] Prehrajto 4K HEVC/HDR fast stream-copy enabled (hvc1)');
-  return output;
-}
-
 function patchPrehrajtoSafariH264(args) {
   if (!isPrehrajtoSoftwareH264Transcode(args)) return args;
+
   let patched = [...args];
-  const codecIndex = patched.findIndex((value, index) => index < patched.length - 1 && (value === '-c:v' || value === '-codec:v') && String(patched[index + 1] || '').toLowerCase() === 'libx264');
-  patched = setOrInsertOption(patched, ['-pix_fmt'], '-pix_fmt', 'yuv420p', codecIndex >= 0 ? codecIndex + 1 : -1);
-  patched = setOrInsertOption(patched, ['-level', '-level:v'], '-level:v', '41', codecIndex >= 0 ? codecIndex + 1 : -1);
+  const codecIndex = patched.findIndex(
+    (value, index) =>
+      index < patched.length - 1 &&
+      (value === '-c:v' || value === '-codec:v') &&
+      String(patched[index + 1] || '').toLowerCase() === 'libx264'
+  );
+
+  patched = setOrInsertOption(
+    patched,
+    ['-pix_fmt'],
+    '-pix_fmt',
+    'yuv420p',
+    codecIndex >= 0 ? codecIndex + 1 : -1
+  );
+  patched = setOrInsertOption(
+    patched,
+    ['-level', '-level:v'],
+    '-level:v',
+    '41',
+    codecIndex >= 0 ? codecIndex + 1 : -1
+  );
   patched = setOrInsertOption(patched, ['-threads'], '-threads', '1');
+
   console.log('[ffmpeg-copy-fix] Prehrajto H264 Safari output: yuv420p level 4.1 threads=1');
   return patched;
 }
@@ -192,20 +196,23 @@ function patchPrehrajtoAudioResources(args) {
   if (!isPrehrajtoProxyInput(args)) return args;
   if (!hasArgValue(args, ['-c:a', '-codec:a'], 'aac')) return args;
   if (hasArgValue(args, ['-c:v', '-codec:v'], 'libx264')) return args;
-  const patched = setOrInsertOption(args, ['-threads'], '-threads', '1');
-  console.log('[ffmpeg-copy-fix] Prehrajto AAC audio threads=1');
+  let patched = setOrInsertOption(args, ['-threads'], '-threads', '1');
+  patched = setOrInsertOption(patched, ['-ac:a', '-ac'], '-ac:a', '2');
+  console.log('[ffmpeg-copy-fix] Prehrajto AAC audio: stereo threads=1');
   return patched;
 }
 
 function patchArgs(command, args) {
   if (!isFfmpegCommand(command) || !Array.isArray(args)) return args;
-  let patchedArgs = patchPrehrajto4kHevcCopy(args);
-  patchedArgs = patchPrehrajtoSafariH264(patchedArgs);
-  patchedArgs = patchPrehrajtoAudioResources(patchedArgs);
 
+  let patchedArgs = patchPrehrajtoSafariH264(args);
+  patchedArgs = patchPrehrajtoAudioResources(patchedArgs);
   let usesVideoCopy = false;
   for (let i = 0; i < patchedArgs.length - 1; i += 1) {
-    if ((patchedArgs[i] === '-c:v' || patchedArgs[i] === '-codec:v') && String(patchedArgs[i + 1]).toLowerCase() === 'copy') {
+    if (
+      (patchedArgs[i] === '-c:v' || patchedArgs[i] === '-codec:v') &&
+      String(patchedArgs[i + 1]).toLowerCase() === 'copy'
+    ) {
       usesVideoCopy = true;
       break;
     }
@@ -222,7 +229,9 @@ function patchArgs(command, args) {
     }
     output.push(patchedArgs[i]);
   }
-  if (changed) console.log('[ffmpeg-copy-fix] removed force_key_frames from stream-copy remux');
+  if (changed) {
+    console.log('[ffmpeg-copy-fix] removed force_key_frames from stream-copy remux');
+  }
   return output;
 }
 
@@ -250,7 +259,9 @@ childProcess.ChildProcess.prototype.spawn = function patchedChildSpawn(options) 
     const command = options.args[0];
     const args = options.args.slice(1);
     const patchedArgs = patchArgs(command, args);
-    if (patchedArgs !== args) options = { ...options, args: [command, ...patchedArgs] };
+    if (patchedArgs !== args) {
+      options = { ...options, args: [command, ...patchedArgs] };
+    }
   }
   return originalChildSpawn.call(this, options);
 };
