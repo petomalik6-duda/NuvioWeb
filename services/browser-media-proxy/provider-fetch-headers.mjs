@@ -1,6 +1,7 @@
 const nativeFetch = globalThis.fetch.bind(globalThis);
 
 const PROVIDER_ROOTS = ["streamstr.stream", "premiumcdn.net"];
+const STREAMSTR_ROOT = "streamstr.stream";
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const ACCEPT_LANGUAGE = "cs-CZ,cs;q=0.9,en;q=0.8";
@@ -11,17 +12,42 @@ const GENERIC_CONTENT_TYPES = new Set([
   "application/binary",
   "application/download"
 ]);
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+function hostnameMatchesRoot(hostname, root) {
+  return hostname === root || hostname.endsWith(`.${root}`);
+}
 
 function isProviderUrl(value = "") {
   try {
     const url = new URL(String(value || ""));
     if (url.protocol !== "https:") return false;
     const hostname = url.hostname.toLowerCase();
-    return PROVIDER_ROOTS.some(
-      (root) => hostname === root || hostname.endsWith(`.${root}`)
+    return PROVIDER_ROOTS.some((root) => hostnameMatchesRoot(hostname, root));
+  } catch (_) {
+    return false;
+  }
+}
+
+function isControlledHttpStreamstrUrl(value = "") {
+  try {
+    const url = new URL(String(value || ""));
+    return (
+      url.protocol === "http:" &&
+      hostnameMatchesRoot(url.hostname.toLowerCase(), STREAMSTR_ROOT)
     );
   } catch (_) {
     return false;
+  }
+}
+
+function resolveRedirectUrl(response, currentUrl) {
+  const location = String(response?.headers?.get?.("location") || "").trim();
+  if (!location) return "";
+  try {
+    return new URL(location, currentUrl).toString();
+  } catch (_) {
+    return "";
   }
 }
 
@@ -82,9 +108,14 @@ globalThis.fetch = async function providerCompatibleFetch(input, init = {}) {
   if (!isProviderUrl(url)) return nativeFetch(input, init);
 
   const originalHeaders =
-    init?.headers || (typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined);
+    init?.headers ||
+    (typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined);
   const headers = new Headers(originalHeaders || {});
-  const method = String(init?.method || (typeof Request !== "undefined" && input instanceof Request ? input.method : "GET") || "GET").toUpperCase();
+  const method = String(
+    init?.method ||
+      (typeof Request !== "undefined" && input instanceof Request ? input.method : "GET") ||
+      "GET"
+  ).toUpperCase();
 
   // Prehraj.to's public client intentionally uses a browser UA and Czech
   // Accept-Language. ffprobe/ffmpeg otherwise inject Lavf as the UA when they
@@ -102,11 +133,34 @@ globalThis.fetch = async function providerCompatibleFetch(input, init = {}) {
     headers.set("Range", "bytes=0-");
   }
 
-  const response = await nativeFetch(input, {
+  let response = await nativeFetch(input, {
     ...init,
     method,
     headers
   });
+
+  // Some large/4K Prehraj.to objects intentionally redirect from their HTTPS
+  // entry URL to an HTTP URL on another *.streamstr.stream host. The media
+  // bridge rejects HTTP URLs before issuing a request, while forcing HTTPS on
+  // those storage hosts can fail certificate validation. Follow exactly one
+  // such provider-owned downgrade here, with manual redirects preserved, so a
+  // later redirect still returns to the bridge's normal domain allow-list.
+  if ((method === "GET" || method === "HEAD") && REDIRECT_STATUSES.has(Number(response.status))) {
+    const downgradeUrl = resolveRedirectUrl(response, url);
+    if (isControlledHttpStreamstrUrl(downgradeUrl)) {
+      let downgradeHost = "unknown";
+      try {
+        downgradeHost = new URL(downgradeUrl).hostname;
+      } catch (_) {}
+      console.info(`[provider-fetch] controlled streamstr http redirect host=${downgradeHost}`);
+      response = await nativeFetch(downgradeUrl, {
+        ...init,
+        method,
+        headers,
+        redirect: "manual"
+      });
+    }
+  }
 
   return withImmediateStreamingMime(response);
 };
