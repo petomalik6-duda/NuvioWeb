@@ -26,7 +26,7 @@
     "lint:home:incremental": "eslint \"js/ui/screens/home/**/*.js\" \"eslint.config.mjs\"",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "serve": "node --import ./services/browser-media-proxy/provider-fetch-headers.mjs ./scripts/serve.mjs"
+    "serve": "node --import ./services/browser-media-proxy/provider-fetch-headers.mjs --import ./services/browser-media-proxy/hls-remux-http.mjs ./scripts/serve.mjs"
   },
   "devDependencies": {
     "@csstools/postcss-global-data": "^4.0.0",
