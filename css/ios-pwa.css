@@ -65,6 +65,89 @@ html.nuvio-ios-standalone body {
   transform: rotate(180deg);
 }
 
+/* Nuvio Mobile 0.5.8 fixed hero movement on horizontal/tablet layouts.
+   Keep the web hero in one stable layout box as Safari changes its dynamic
+   viewport during rotation, toolbar collapse and PWA transitions. */
+html.nuvio-ios-webkit .home-screen-shell.desktop-navigation-enabled .home-hero,
+html.nuvio-ios-webkit
+  .home-screen-shell.desktop-navigation-enabled.home-layout-modern
+  .home-modern-stage,
+html.nuvio-ios-webkit
+  .home-screen-shell.desktop-navigation-enabled.home-layout-modern
+  .home-modern-hero-card {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+html.nuvio-ios-webkit
+  .home-screen-shell.desktop-navigation-enabled.home-layout-modern
+  .home-modern-stage {
+  min-width: 0;
+  overflow-x: clip;
+}
+
+html.nuvio-ios-webkit .home-screen-shell.desktop-navigation-enabled .home-hero-copy,
+html.nuvio-ios-webkit
+  .home-screen-shell.desktop-navigation-enabled.home-layout-modern
+  .home-modern-hero-copy {
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+@media (min-width: 700px) and (max-width: 1366px) and (pointer: coarse) {
+  html.nuvio-ios-webkit {
+    --nuvio-ipad-page-gutter: max(28px, calc(env(safe-area-inset-left, 0px) + 20px));
+  }
+
+  html.nuvio-ios-webkit .home-screen-shell.desktop-navigation-enabled .home-hero-card,
+  html.nuvio-ios-webkit
+    .home-screen-shell.desktop-navigation-enabled.home-layout-modern
+    .home-modern-hero-card {
+    min-height: clamp(500px, 64dvh, 700px);
+    height: clamp(500px, 64dvh, 700px);
+  }
+
+  html.nuvio-ios-webkit .home-screen-shell.desktop-navigation-enabled .home-hero-copy,
+  html.nuvio-ios-webkit
+    .home-screen-shell.desktop-navigation-enabled.home-layout-modern
+    .home-modern-hero-copy {
+    width: min(58%, 640px);
+    max-width: min(58%, 640px);
+    padding-left: var(--nuvio-ipad-page-gutter);
+    padding-right: 20px;
+  }
+
+  html.nuvio-ios-webkit
+    .home-screen-shell.desktop-navigation-enabled.home-layout-modern
+    .desktop-hero-carousel {
+    right: max(24px, calc(env(safe-area-inset-right, 0px) + 16px));
+  }
+}
+
+@media (min-width: 700px) and (max-width: 1366px) and (pointer: coarse) and (orientation: landscape) {
+  html.nuvio-ios-webkit .home-screen-shell.desktop-navigation-enabled .home-hero-card,
+  html.nuvio-ios-webkit
+    .home-screen-shell.desktop-navigation-enabled.home-layout-modern
+    .home-modern-hero-card {
+    min-height: clamp(430px, 68dvh, 650px);
+    height: clamp(430px, 68dvh, 650px);
+  }
+
+  html.nuvio-ios-webkit .home-screen-shell.desktop-navigation-enabled .home-hero-copy,
+  html.nuvio-ios-webkit
+    .home-screen-shell.desktop-navigation-enabled.home-layout-modern
+    .home-modern-hero-copy {
+    width: min(52%, 620px);
+    max-width: min(52%, 620px);
+  }
+}
+
+html.nuvio-youtube-stream-open,
+html.nuvio-youtube-stream-open body {
+  overflow: hidden !important;
+  overscroll-behavior: none;
+}
+
 @media (orientation: landscape) and (max-height: 520px) {
   .nuvio-ios-media-tools {
     right: max(10px, env(safe-area-inset-right, 0px));
