@@ -161,6 +161,66 @@ function isPrehrajtoSoftwareH264Transcode(args) {
   return isPrehrajtoProxyInput(args) && hasArgValue(args, ['-c:v', '-codec:v'], 'libx264');
 }
 
+function isPrehrajto4kSoftwareTranscode(args) {
+  if (!isPrehrajtoSoftwareH264Transcode(args)) return false;
+  for (let i = 0; i < args.length - 1; i += 1) {
+    if (
+      (args[i] === '-vf' || args[i] === '-filter:v') &&
+      /(?:^|,)scale=1920:-2(?:[:,]|$)/i.test(String(args[i + 1] || ''))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function patchPrehrajto4kHevcCopy(args) {
+  if (!isPrehrajto4kSoftwareTranscode(args)) return args;
+
+  const removeValueOptions = new Set([
+    '-vf',
+    '-filter:v',
+    '-pix_fmt',
+    '-preset:v',
+    '-profile:v',
+    '-tune:v',
+    '-level',
+    '-level:v',
+    '-vsync',
+    '-r:v',
+    '-sc_threshold',
+    '-g',
+    '-keyint_min',
+    '-b:v',
+    '-maxrate',
+    '-bufsize',
+    '-crf',
+    '-tag:v'
+  ]);
+
+  const output = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (removeValueOptions.has(arg)) {
+      i += 1;
+      continue;
+    }
+    if (
+      (arg === '-c:v' || arg === '-codec:v') &&
+      i + 1 < args.length &&
+      String(args[i + 1] || '').toLowerCase() === 'libx264'
+    ) {
+      output.push('-c:v', 'copy', '-tag:v', 'hvc1');
+      i += 1;
+      continue;
+    }
+    output.push(arg);
+  }
+
+  console.log('[ffmpeg-copy-fix] Prehrajto 4K HEVC/HDR stream-copy enabled (hvc1)');
+  return output;
+}
+
 function patchPrehrajtoSafariH264(args) {
   if (!isPrehrajtoSoftwareH264Transcode(args)) return args;
 
@@ -204,7 +264,8 @@ function patchPrehrajtoAudioResources(args) {
 function patchArgs(command, args) {
   if (!isFfmpegCommand(command) || !Array.isArray(args)) return args;
 
-  let patchedArgs = patchPrehrajtoSafariH264(args);
+  let patchedArgs = patchPrehrajto4kHevcCopy(args);
+  patchedArgs = patchPrehrajtoSafariH264(patchedArgs);
   patchedArgs = patchPrehrajtoAudioResources(patchedArgs);
   let usesVideoCopy = false;
   for (let i = 0; i < patchedArgs.length - 1; i += 1) {
