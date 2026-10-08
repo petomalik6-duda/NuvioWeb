@@ -1,8 +1,8 @@
 {
-  "name": "Nuvio",
-  "short_name": "Nuvio",
-  "id": "./",
-  "start_url": "./",
+  "name": "Nuvio iOS 0.5.8",
+  "short_name": "Nuvio 0.5.8",
+  "id": "./?app=nuvio-ios-058",
+  "start_url": "./?app=nuvio-ios-058",
   "scope": "./",
   "display": "standalone",
   "background_color": "#0d0d0d",
