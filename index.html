@@ -8,6 +8,19 @@
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <script src="assets/runtime/legacy-features.js"></script>
+    <script>
+      (() => {
+        const ua = String(navigator.userAgent || "");
+        const platform = String(navigator.platform || "");
+        const isTouchMac = platform === "MacIntel" && Number(navigator.maxTouchPoints || 0) > 1;
+        const isIOS = /iPad|iPhone|iPod/i.test(ua) || isTouchMac;
+        if (!isIOS) return;
+        document.documentElement.classList.add("nuvio-ios-webkit");
+        if (window.matchMedia?.("(display-mode: standalone)")?.matches || navigator.standalone === true) {
+          document.documentElement.classList.add("nuvio-ios-standalone");
+        }
+      })();
+    </script>
     <meta name="theme-color" content="#0d0d0d" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -22,7 +35,7 @@
     <link rel="stylesheet" href="css/components.css?v=20260531supporters2" />
     <link rel="stylesheet" href="css/themes.css?v=20260509s" />
     <link rel="stylesheet" href="css/desktop.css?v=20260821" />
-    <link rel="stylesheet" href="css/ios-pwa.css?v=20261007" />
+    <link rel="stylesheet" href="css/ios-pwa.css?v=20261008nuvio0581" />
   </head>
   <body>
     <script src="boot-guard.js"></script>
@@ -33,6 +46,7 @@
     <script src="nuvio.env.js"></script>
 
     <script src="assets/libs/qrcode-generator.js"></script>
+    <script src="assets/runtime/nuvio-mobile-0.5.8-compat.js?v=20261008a"></script>
 
     <script
       src="app.bundle.js?v=20260531supporters2"
