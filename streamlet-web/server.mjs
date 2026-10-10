@@ -52,6 +52,7 @@ function parseCookies(req) {
   const out={}; for (const part of String(req.headers.cookie||'').split(';')) { const i=part.indexOf('='); if (i<0) continue; const k=part.slice(0,i).trim(), v=part.slice(i+1).trim(); if (k) { try { out[k]=decodeURIComponent(v); } catch { out[k]=v; } } } return out;
 }
 function validDeviceId(value) { return typeof value==='string' && /^[A-Za-z0-9._:-]{8,128}$/.test(value); }
+function sessionCookie(token) { return `${ACCOUNT_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`; }
 async function accountPost(route, fields={}, token='') {
   const headers={'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','User-Agent':'StreamletWeb/1.1'};
   if (token) headers.Authorization=`Bearer ${token}`;
@@ -84,6 +85,12 @@ async function handleAccount(req,res,url) {
     const token=parseCookies(req)[ACCOUNT_COOKIE]||'';
     return json(res,200,{signedIn:Boolean(token)});
   }
+  if (url.pathname==='/api/account/session/import' && req.method==='POST') {
+    if (req.headers['x-streamlet-web']!=='device-code') return json(res,403,{error:'handoff_forbidden'});
+    const body=await readJsonBody(req); const token=String(body.accessToken||body.access_token||'');
+    if (token.length<20 || token.length>4096 || /\s/.test(token)) return json(res,400,{error:'invalid_access_token'});
+    return json(res,200,{signedIn:true},{'Set-Cookie':sessionCookie(token)});
+  }
   if (url.pathname==='/api/account/device-code/request') {
     const body=req.method==='POST'?await readJsonBody(req):{};
     const deviceId=String(body.deviceId||body.device_id||url.searchParams.get('device_id')||'');
@@ -97,10 +104,7 @@ async function handleAccount(req,res,url) {
     if (!validDeviceId(deviceId)) return json(res,400,{error:'invalid_device_id'});
     const upstream=await accountPost('/auth/device_code_exchange.php',{device_id:deviceId});
     const token=accessTokenFrom(upstream.data);
-    if (upstream.ok && token) {
-      const cookie=`${ACCOUNT_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`;
-      return json(res,200,{...stripToken(upstream.data),signedIn:true},{'Set-Cookie':cookie});
-    }
+    if (upstream.ok && token) return json(res,200,{...stripToken(upstream.data),signedIn:true},{'Set-Cookie':sessionCookie(token)});
     return json(res,upstream.status,{...stripToken(upstream.data),signedIn:false});
   }
   if (url.pathname==='/api/account/logout' && req.method==='POST') {
@@ -112,8 +116,8 @@ async function handleAccount(req,res,url) {
 }
 
 async function handleApi(req,res,url) {
-  if (url.pathname==='/api/health') return json(res,200,{ok:true,app:'Streamlet Web',version:'1.1.0',accountDeviceCode:true});
-  if (url.pathname==='/api/config') return json(res,200,{tmdbConfigured:true,catalogProvider:tmdbBearer?'tmdb':'cinemeta',accountDeviceCode:true});
+  if (url.pathname==='/api/health') return json(res,200,{ok:true,app:'Streamlet Web',version:'1.1.1',accountDeviceCode:true,browserFallback:true});
+  if (url.pathname==='/api/config') return json(res,200,{tmdbConfigured:true,catalogProvider:tmdbBearer?'tmdb':'cinemeta',accountDeviceCode:true,browserFallback:true});
   if (url.pathname.startsWith('/api/account/')) return handleAccount(req,res,url);
 
   if (url.pathname==='/api/tmdb') {
