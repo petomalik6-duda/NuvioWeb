@@ -3,6 +3,33 @@ import { handleIptvRoute } from './iptv.mjs';
 
 const port = Number(process.env.PORT || 3000);
 
+function attr(text, name) {
+  const m = String(text || '').match(new RegExp(`\\b${name}="([^"]*)"`, 'i'));
+  return m ? m[1] : '';
+}
+
+function m3uEntries(text) {
+  const lines = String(text || '').replace(/\r/g, '').split('\n');
+  const out = [];
+  let info = '';
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line.startsWith('#EXTINF')) { info = line; continue; }
+    if (info && line && !line.startsWith('#')) {
+      const name = info.includes(',') ? info.slice(info.lastIndexOf(',') + 1).trim() : '';
+      out.push({ id: attr(info, 'tvg-id'), name, url: line });
+      info = '';
+    }
+  }
+  return out;
+}
+
+function epgIds(xml) {
+  const ids = new Set();
+  for (const m of String(xml || '').matchAll(/<channel\b[^>]*\bid="([^"]+)"/gi)) ids.add(m[1]);
+  return ids;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   try {
@@ -32,14 +59,19 @@ server.listen(port, '0.0.0.0', () => {
     try {
       const m3u = await fetch(`http://127.0.0.1:${port}/iptv/czsk.m3u`);
       const m3uText = await m3u.text();
-      const channelCount = (m3uText.match(/^#EXTINF/gm) || []).length;
-      console.log(`[IPTV selftest] M3U status=${m3u.status} channels=${channelCount} bytes=${Buffer.byteLength(m3uText)}`);
+      const entries = m3uEntries(m3uText);
+      console.log(`[IPTV selftest] M3U status=${m3u.status} channels=${entries.length} bytes=${Buffer.byteLength(m3uText)}`);
 
       const epg = await fetch(`http://127.0.0.1:${port}/iptv/czsk.xml`);
       const epgText = await epg.text();
-      const epgChannels = (epgText.match(/<channel\b/gi) || []).length;
+      const ids = epgIds(epgText);
       const programmes = (epgText.match(/<programme\b/gi) || []).length;
-      console.log(`[IPTV selftest] EPG status=${epg.status} channels=${epgChannels} programmes=${programmes} bytes=${Buffer.byteLength(epgText)}`);
+      const withId = entries.filter(e => e.id);
+      const matched = withId.filter(e => ids.has(e.id));
+      const missing = withId.filter(e => !ids.has(e.id));
+      console.log(`[IPTV selftest] EPG status=${epg.status} channels=${ids.size} programmes=${programmes} bytes=${Buffer.byteLength(epgText)}`);
+      console.log(`[IPTV mapping] playlistWithTvgId=${withId.length} exactMatches=${matched.length} missing=${missing.length}`);
+      console.log(`[IPTV mapping] missingSamples=${missing.slice(0,20).map(e => `${e.id}|${e.name}`).join(' ; ')}`);
     } catch (e) {
       console.error(`[IPTV selftest] failed: ${e?.message || e}`);
     }
