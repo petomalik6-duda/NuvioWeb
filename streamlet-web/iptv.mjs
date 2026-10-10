@@ -112,7 +112,7 @@ async function getPlaylistEntries() {
 async function buildM3u() {
   if (cache.m3u.value && Date.now() - cache.m3u.at < TTL) return cache.m3u.value;
   const entries = await getPlaylistEntries();
-  const epgUrl = `${PUBLIC_BASE}/iptv/czsk.xml.gz`;
+  const epgUrl = `${PUBLIC_BASE}/iptv/czsk.xml`;
   const out = [`#EXTM3U x-tvg-url="${epgUrl}" url-tvg="${epgUrl}"`];
   for (const entry of entries) out.push(...entry.lines);
   const value = `${out.join('\n')}\n`;
