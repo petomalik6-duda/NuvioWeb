@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Streamlet-inspired PWA for iPhone and iPad with Stremio addon support.",
   "scripts": {
-    "start": "node fetch-iptv-repo.mjs && node server.mjs"
+    "start": "node server.mjs"
   },
   "engines": {
     "node": ">=20"
