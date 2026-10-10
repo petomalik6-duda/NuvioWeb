@@ -10,6 +10,8 @@ const publicDir = path.join(__dirname, 'public');
 const port = Number(process.env.PORT || 3000);
 const tmdbBearer = process.env.TMDB_BEARER || '';
 const CINEMETA = 'https://v3-cinemeta.strem.io';
+const ACCOUNT_BASE = 'https://streamlet.info/account/v1';
+const ACCOUNT_COOKIE = 'streamlet_account';
 
 const mime = {
   '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8',
@@ -17,7 +19,7 @@ const mime = {
 };
 
 function send(res,status,body,headers={}) { const payload = typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body); res.writeHead(status,{'Cache-Control':'no-store',...headers}); res.end(payload); }
-function json(res,status,value) { send(res,status,value,{'Content-Type':'application/json; charset=utf-8'}); }
+function json(res,status,value,headers={}) { send(res,status,value,{'Content-Type':'application/json; charset=utf-8',...headers}); }
 
 function privateIp(host) {
   const kind = net.isIP(host); if (!kind) return false;
@@ -40,6 +42,30 @@ async function safeFetch(input,init={},redirects=0) {
 async function proxyJson(res,target) { const r=await safeFetch(target); const text=await r.text(); let data; try{data=JSON.parse(text)}catch{return json(res,502,{error:'Upstream did not return JSON',status:r.status})} return json(res,r.ok?200:r.status,data); }
 async function addonBase(manifest) { const u=await publicUrl(manifest); u.pathname=u.pathname.replace(/\/manifest\.json$/i,'').replace(/\/$/,''); u.search=''; u.hash=''; return u.href.replace(/\/$/,''); }
 
+async function readJsonBody(req) {
+  const chunks=[]; let size=0;
+  for await (const chunk of req) { size+=chunk.length; if (size>64*1024) throw new Error('Request body too large'); chunks.push(chunk); }
+  if (!chunks.length) return {};
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new Error('Invalid JSON body'); }
+}
+function parseCookies(req) {
+  const out={}; for (const part of String(req.headers.cookie||'').split(';')) { const i=part.indexOf('='); if (i<0) continue; const k=part.slice(0,i).trim(), v=part.slice(i+1).trim(); if (k) { try { out[k]=decodeURIComponent(v); } catch { out[k]=v; } } } return out;
+}
+function validDeviceId(value) { return typeof value==='string' && /^[A-Za-z0-9._:-]{8,128}$/.test(value); }
+async function accountPost(route, fields={}, token='') {
+  const headers={'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','User-Agent':'StreamletWeb/1.1'};
+  if (token) headers.Authorization=`Bearer ${token}`;
+  const r=await fetch(`${ACCOUNT_BASE}${route}`,{method:'POST',headers,body:new URLSearchParams(fields),redirect:'manual',signal:AbortSignal.timeout(20000)});
+  const text=await r.text(); let data; try { data=JSON.parse(text); } catch { data={message:text||`HTTP ${r.status}`}; }
+  return {status:r.status,ok:r.ok,data};
+}
+function accessTokenFrom(data) { return data?.access_token || data?.token || data?.data?.access_token || data?.data?.token || ''; }
+function stripToken(data) {
+  if (!data || typeof data!=='object') return data;
+  const copy=structuredClone(data); delete copy.access_token; delete copy.token; if (copy.data && typeof copy.data==='object') { delete copy.data.access_token; delete copy.data.token; }
+  return copy;
+}
+
 function toTmdb(meta,type) {
   const year=String(meta.year||''); const rating=Number(meta.imdbRating||meta.imdb_rating||0) || 0; const isTv=type==='series';
   return {
@@ -53,9 +79,42 @@ async function cinemetaCatalog(type,search='') {
   const extra=search?`/search=${encodeURIComponent(search)}`:''; const r=await safeFetch(`${CINEMETA}/catalog/${type}/top${extra}.json`); if (!r.ok) throw new Error(`Cinemeta HTTP ${r.status}`); return r.json();
 }
 
+async function handleAccount(req,res,url) {
+  if (url.pathname==='/api/account/session') {
+    const token=parseCookies(req)[ACCOUNT_COOKIE]||'';
+    return json(res,200,{signedIn:Boolean(token)});
+  }
+  if (url.pathname==='/api/account/device-code/request') {
+    const body=req.method==='POST'?await readJsonBody(req):{};
+    const deviceId=String(body.deviceId||body.device_id||url.searchParams.get('device_id')||'');
+    if (!validDeviceId(deviceId)) return json(res,400,{error:'invalid_device_id'});
+    const upstream=await accountPost('/auth/device_code_request.php',{device_id:deviceId});
+    return json(res,upstream.status,upstream.data);
+  }
+  if (url.pathname==='/api/account/device-code/exchange') {
+    const body=req.method==='POST'?await readJsonBody(req):{};
+    const deviceId=String(body.deviceId||body.device_id||url.searchParams.get('device_id')||'');
+    if (!validDeviceId(deviceId)) return json(res,400,{error:'invalid_device_id'});
+    const upstream=await accountPost('/auth/device_code_exchange.php',{device_id:deviceId});
+    const token=accessTokenFrom(upstream.data);
+    if (upstream.ok && token) {
+      const cookie=`${ACCOUNT_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`;
+      return json(res,200,{...stripToken(upstream.data),signedIn:true},{'Set-Cookie':cookie});
+    }
+    return json(res,upstream.status,{...stripToken(upstream.data),signedIn:false});
+  }
+  if (url.pathname==='/api/account/logout' && req.method==='POST') {
+    const token=parseCookies(req)[ACCOUNT_COOKIE]||'';
+    if (token) { try { await accountPost('/auth/logout.php',{},token); } catch {} }
+    return json(res,200,{ok:true,signedIn:false},{'Set-Cookie':`${ACCOUNT_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`});
+  }
+  return json(res,404,{error:'Account route not found'});
+}
+
 async function handleApi(req,res,url) {
-  if (url.pathname==='/api/health') return json(res,200,{ok:true,app:'Streamlet Web',version:'1.0.0'});
-  if (url.pathname==='/api/config') return json(res,200,{tmdbConfigured:true,catalogProvider:tmdbBearer?'tmdb':'cinemeta'});
+  if (url.pathname==='/api/health') return json(res,200,{ok:true,app:'Streamlet Web',version:'1.1.0',accountDeviceCode:true});
+  if (url.pathname==='/api/config') return json(res,200,{tmdbConfigured:true,catalogProvider:tmdbBearer?'tmdb':'cinemeta',accountDeviceCode:true});
+  if (url.pathname.startsWith('/api/account/')) return handleAccount(req,res,url);
 
   if (url.pathname==='/api/tmdb') {
     const p=url.searchParams.get('path')||'';
