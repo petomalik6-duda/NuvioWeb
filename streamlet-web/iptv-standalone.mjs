@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { handleIptvRoute } from './iptv.mjs';
-import { handleMagioRoute } from './magio.mjs';
+import { handleMagioRoute } from './magio-v2.mjs';
 
 const port = Number(process.env.PORT || 3000);
 
@@ -14,8 +14,9 @@ const server = http.createServer(async (req, res) => {
         service: 'CZ+SK IPTV',
         playlist: '/iptv/czsk.m3u',
         epg: '/iptv/czsk.xml',
-        magioMaxPlaylist: '/iptv/magio-max.m3u',
-        magioMaxEpg: '/iptv/magio-max.xml'
+        magioXLPlaylist: '/iptv/magio-xl.m3u',
+        magioXLEpg: '/iptv/magio-xl.xml',
+        magioXLLineup: '/iptv/magio-xl-lineup.json'
       }));
     }
     if (await handleMagioRoute(req, res, url)) return;
@@ -38,8 +39,9 @@ server.listen(port, '0.0.0.0', () => {
         fetch(`http://127.0.0.1:${port}/iptv/magio-status.json`).then(r => r.json())
       ]);
       console.log(`[IPTV selftest] CZSK channels=${czsk.playlistChannels} epg=${czsk.channelsWithProgrammes} programmes=${czsk.programmes}`);
-      console.log(`[Magio selftest] channels=${magio.channels} epgChannels=${magio.epgChannels} programmes=${magio.programmes} missingTargets=${magio.missingTargets}`);
-      if (Array.isArray(magio.missingSample)) console.log(`[Magio selftest] missingSample=${magio.missingSample.join(' ; ')}`);
+      console.log(`[Magio selftest] official=${magio.officialChannels} streamable=${magio.streamableChannels} epg=${magio.channelsWithProgrammes} programmes=${magio.programmes} missing=${magio.missingStreams}`);
+      if (Array.isArray(magio.groupStats)) console.log(`[Magio groups] ${magio.groupStats.map(g => `${g.slug}:${g.streamable}/${g.official}`).join(' | ')}`);
+      if (Array.isArray(magio.missingSample)) console.log(`[Magio missing] ${magio.missingSample.slice(0,30).join(' ; ')}`);
     } catch (e) {
       console.error(`[IPTV selftest] failed: ${e?.message || e}`);
     }
