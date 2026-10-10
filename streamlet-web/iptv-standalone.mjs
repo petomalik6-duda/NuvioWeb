@@ -8,6 +8,18 @@ function attr(text, name) {
   return m ? m[1] : '';
 }
 
+function norm(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\b(?:hd|sd|uhd|fhd|4k|1080p|720p|czech republic|czechia|slovakia|slovensko|cesko|cz|sk)\b/g, '')
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function idBase(id) {
+  return String(id || '').split('@')[0].split('.')[0];
+}
+
 function m3uEntries(text) {
   const lines = String(text || '').replace(/\r/g, '').split('\n');
   const out = [];
@@ -24,10 +36,17 @@ function m3uEntries(text) {
   return out;
 }
 
-function epgIds(xml) {
-  const ids = new Set();
-  for (const m of String(xml || '').matchAll(/<channel\b[^>]*\bid="([^"]+)"/gi)) ids.add(m[1]);
-  return ids;
+function epgChannels(xml) {
+  const out = [];
+  const blocks = String(xml || '').match(/<channel\b[\s\S]*?<\/channel>/gi) || [];
+  for (const block of blocks) {
+    const id = attr(block, 'id');
+    const names = [...block.matchAll(/<display-name(?:\s[^>]*)?>([\s\S]*?)<\/display-name>/gi)]
+      .map(m => m[1].replace(/<[^>]+>/g, '').trim())
+      .filter(Boolean);
+    out.push({ id, names });
+  }
+  return out;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -64,14 +83,35 @@ server.listen(port, '0.0.0.0', () => {
 
       const epg = await fetch(`http://127.0.0.1:${port}/iptv/czsk.xml`);
       const epgText = await epg.text();
-      const ids = epgIds(epgText);
+      const channels = epgChannels(epgText);
       const programmes = (epgText.match(/<programme\b/gi) || []).length;
-      const withId = entries.filter(e => e.id);
-      const matched = withId.filter(e => ids.has(e.id));
-      const missing = withId.filter(e => !ids.has(e.id));
-      console.log(`[IPTV selftest] EPG status=${epg.status} channels=${ids.size} programmes=${programmes} bytes=${Buffer.byteLength(epgText)}`);
-      console.log(`[IPTV mapping] playlistWithTvgId=${withId.length} exactMatches=${matched.length} missing=${missing.length}`);
-      console.log(`[IPTV mapping] missingSamples=${missing.slice(0,20).map(e => `${e.id}|${e.name}`).join(' ; ')}`);
+      const byName = new Map();
+      for (const ch of channels) {
+        for (const name of ch.names) {
+          const key = norm(name);
+          if (!key) continue;
+          if (!byName.has(key)) byName.set(key, []);
+          byName.get(key).push(ch);
+        }
+      }
+
+      const results = entries.map(e => {
+        const candidates = [...new Set([norm(e.name), norm(idBase(e.id))].filter(Boolean))];
+        let hits = [];
+        for (const c of candidates) {
+          const found = byName.get(c) || [];
+          if (found.length) { hits = found; break; }
+        }
+        return { ...e, candidates, hits };
+      });
+      const matched = results.filter(r => r.hits.length === 1);
+      const ambiguous = results.filter(r => r.hits.length > 1);
+      const missing = results.filter(r => r.hits.length === 0);
+
+      console.log(`[IPTV selftest] EPG status=${epg.status} channels=${channels.length} programmes=${programmes} bytes=${Buffer.byteLength(epgText)}`);
+      console.log(`[IPTV fuzzy] uniqueMatches=${matched.length} ambiguous=${ambiguous.length} missing=${missing.length}`);
+      console.log(`[IPTV fuzzy] matchSamples=${matched.slice(0,20).map(r => `${r.id}|${r.name}->${r.hits[0].id}|${r.hits[0].names[0]}`).join(' ; ')}`);
+      console.log(`[IPTV fuzzy] missingSamples=${missing.slice(0,25).map(r => `${r.id}|${r.name}|${r.candidates.join('/')}`).join(' ; ')}`);
     } catch (e) {
       console.error(`[IPTV selftest] failed: ${e?.message || e}`);
     }
