@@ -1,11 +1,11 @@
 {
   "name": "streamlet-web",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Streamlet-inspired PWA for iPhone and iPad with Stremio addon support.",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node probe-account.mjs && node server.mjs"
   },
   "engines": {
     "node": ">=20"
