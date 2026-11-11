@@ -1,0 +1,20 @@
+name: IPTV regression tests
+on:
+  push:
+    branches: [streamlet-web-v1]
+    paths: ['streamlet-web/**', '.github/workflows/iptv-test.yml']
+  pull_request:
+    branches: [streamlet-web-v1]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --test streamlet-web/*.test.mjs
+      - run: |
+          for file in streamlet-web/*.mjs; do node --check "$file"; done

@@ -1,3 +1,4 @@
+import { createSourceCache, coalesce } from './source-cache.mjs';
 import { gunzipSync } from 'node:zlib';
 import { MAGIO_XL_GROUPS, MAGIO_ALIASES } from './magio-lineup.mjs';
 
@@ -9,6 +10,7 @@ const EPG_SOURCES = [
   { country: 'cz', url: 'https://epgshare01.online/epgshare01/epg_ripper_CZ1.xml.gz' }
 ];
 const TTL = 6 * 60 * 60 * 1000;
+const sourcesCache = createSourceCache({ ttl: TTL });
 const cache = { entries:null, entriesAt:0, selection:null, selectionAt:0, epgData:null, epgDataAt:0, epg:null, epgAt:0, stats:null };
 
 function attr(text, name) {
@@ -64,9 +66,13 @@ function parseM3u(text, sourceCountry='') {
   return out;
 }
 
-async function sourceEntries() {
-  if (cache.entries && Date.now()-cache.entriesAt < TTL) return cache.entries;
-  const loaded = await Promise.all(STREAM_SOURCES.map(async (url,i) => ({ country:STREAM_COUNTRIES[i], text:await fetchText(url) })));
+const sourceEntries = coalesce(async () => {
+  if (cache.entries && Date.now()-cache.entriesAt < sourcesCache.ttl()) return cache.entries;
+  const loaded = await sourcesCache.load(STREAM_SOURCES.map((url,i) => ({url,country:STREAM_COUNTRIES[i]})), async source => {
+    const text = await fetchText(source.url);
+    if (!parseM3u(text, source.country).length) throw new Error('Empty or invalid playlist');
+    return { ...source, text };
+  });
   const seen = new Set(), out=[];
   for (const src of loaded) {
     for (const e of parseM3u(src.text, src.country)) {
@@ -76,7 +82,7 @@ async function sourceEntries() {
   }
   cache.entries=out; cache.entriesAt=Date.now();
   return out;
-}
+});
 
 function aliasesFor(name) {
   return [...new Set([name,...(MAGIO_ALIASES[name]||[])].map(normalize).filter(Boolean))];
@@ -108,8 +114,8 @@ function choose(entries,name,used) {
   return bestScore>=70 ? best : null;
 }
 
-async function selection() {
-  if (cache.selection && Date.now()-cache.selectionAt < TTL) return cache.selection;
+const selection = coalesce(async () => {
+  if (cache.selection && Date.now()-cache.selectionAt < sourcesCache.ttl()) return cache.selection;
   const entries=await sourceEntries();
   const selected=[], missing=[], used=new Set();
   let globalOrder=0;
@@ -125,7 +131,7 @@ async function selection() {
   }
   cache.selection={selected,missing}; cache.selectionAt=Date.now(); cache.epg=null; cache.stats=null;
   return cache.selection;
-}
+});
 
 function setAttr(info,name,value) {
   const escaped=String(value).replace(/"/g,'&quot;');
@@ -163,10 +169,11 @@ function replaceAttr(block,tag,name,value) {
   return String(block).replace(new RegExp(`<${tag}\\b`,'i'),`<${tag} ${name}="${xmlEscape(value)}"`);
 }
 
-async function epgData() {
-  if (cache.epgData && Date.now()-cache.epgDataAt<TTL) return cache.epgData;
-  const sources=await Promise.all(EPG_SOURCES.map(async s=>{
+const epgData = coalesce(async () => {
+  if (cache.epgData && Date.now()-cache.epgDataAt<sourcesCache.ttl()) return cache.epgData;
+  const sources=await sourcesCache.load(EPG_SOURCES, async s=>{
     const xml=decodeMaybeGzip(await fetchBuffer(s.url));
+    if (!/<tv\b/i.test(xml) || !extractBlocks(xml,'channel').length) throw new Error('Empty or invalid EPG');
     const channels=extractBlocks(xml,'channel').map(block=>({id:attr(block,'id'),names:displayNames(block),block,country:s.country})).filter(c=>c.id);
     const programmesByChannel=new Map();
     for (const block of extractBlocks(xml,'programme')) {
@@ -175,14 +182,14 @@ async function epgData() {
       programmesByChannel.get(id).push(block);
     }
     return {...s,channels,programmesByChannel};
-  }));
+  });
   const byKey=new Map();
   for (const ch of sources.flatMap(s=>s.channels)) {
     const keys=new Set([normalize(ch.id),...ch.names.map(normalize)].filter(Boolean));
     for (const key of keys) { if(!byKey.has(key)) byKey.set(key,[]); byKey.get(key).push(ch); }
   }
   cache.epgData={sources,byKey}; cache.epgDataAt=Date.now(); return cache.epgData;
-}
+});
 function chooseEpg(entry,data) {
   const aliases=[...aliasesFor(entry.officialName),normalize(entry.name),normalize(idBase(entry.id))].filter(Boolean);
   let hits=[];
@@ -193,8 +200,8 @@ function chooseEpg(entry,data) {
   return c[0]||hits[0];
 }
 
-async function buildEpg() {
-  if (cache.epg && Date.now()-cache.epgAt<TTL) return cache.epg;
+const buildEpg = coalesce(async () => {
+  if (cache.epg && Date.now()-cache.epgAt<sourcesCache.ttl()) return cache.epg;
   const [{selected,missing},data]=await Promise.all([selection(),epgData()]);
   const sourceFor=new Map();
   for(const s of data.sources) for(const ch of s.channels) sourceFor.set(`${ch.country}|${ch.id}`,s);
@@ -226,7 +233,7 @@ async function buildEpg() {
     epgMissingSample:epgMissing.slice(0,40)
   };
   return cache.epg;
-}
+});
 
 async function lineupJson(){
   const {selected,missing}=await selection(); await buildEpg();
