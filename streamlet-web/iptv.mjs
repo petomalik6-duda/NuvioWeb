@@ -1,3 +1,4 @@
+import { createSourceCache, coalesce } from './source-cache.mjs';
 import { gunzipSync, gzipSync } from 'node:zlib';
 
 const PUBLIC_BASE = 'https://czsk-iptv.onrender.com';
@@ -10,6 +11,7 @@ const EPG_SOURCES = [
   { country: 'cz', url: 'https://epgshare01.online/epgshare01/epg_ripper_CZ1.xml.gz' }
 ];
 const TTL = 6 * 60 * 60 * 1000;
+const sourcesCache = createSourceCache({ ttl: TTL });
 const cache = {
   entries: { at: 0, value: null },
   m3u: { at: 0, value: null },
@@ -93,9 +95,13 @@ function parseM3u(text, country) {
   return entries;
 }
 
-async function getPlaylistEntries() {
-  if (cache.entries.value && Date.now() - cache.entries.at < TTL) return cache.entries.value;
-  const sources = await Promise.all(M3U_SOURCES.map(async s => ({ ...s, text: await (await fetchOk(s.url)).text() })));
+const getPlaylistEntries = coalesce(async () => {
+  if (cache.entries.value && Date.now() - cache.entries.at < sourcesCache.ttl()) return cache.entries.value;
+  const sources = await sourcesCache.load(M3U_SOURCES, async source => {
+    const text = await (await fetchOk(source.url)).text();
+    if (!parseM3u(text, source.country).length) throw new Error('Empty or invalid playlist');
+    return { ...source, text };
+  });
   const seenUrls = new Set();
   const entries = [];
   for (const source of sources) {
@@ -107,10 +113,10 @@ async function getPlaylistEntries() {
   }
   cache.entries = { at: Date.now(), value: entries };
   return entries;
-}
+});
 
-async function buildM3u() {
-  if (cache.m3u.value && Date.now() - cache.m3u.at < TTL) return cache.m3u.value;
+const buildM3u = coalesce(async () => {
+  if (cache.m3u.value && Date.now() - cache.m3u.at < sourcesCache.ttl()) return cache.m3u.value;
   const entries = await getPlaylistEntries();
   const epgUrl = `${PUBLIC_BASE}/iptv/czsk.xml`;
   const out = [`#EXTM3U x-tvg-url="${epgUrl}" url-tvg="${epgUrl}"`];
@@ -118,7 +124,7 @@ async function buildM3u() {
   const value = `${out.join('\n')}\n`;
   cache.m3u = { at: Date.now(), value };
   return value;
-}
+});
 
 function decodeMaybeGzip(buffer) {
   const b = Buffer.from(buffer);
@@ -189,9 +195,10 @@ function pickChannel(entry, byKey) {
   return idMatch || hits[0];
 }
 
-async function loadEpgSources() {
-  return Promise.all(EPG_SOURCES.map(async source => {
+const loadEpgSources = coalesce(async () => {
+  return sourcesCache.load(EPG_SOURCES, async source => {
     const xml = decodeMaybeGzip(await (await fetchOk(source.url)).arrayBuffer());
+    if (!/<tv\b/i.test(xml) || !extractBlocks(xml, 'channel').length) throw new Error('Empty or invalid EPG');
     const channels = extractBlocks(xml, 'channel').map(block => ({
       id: attr(block, 'id'),
       names: displayNames(block),
@@ -207,11 +214,11 @@ async function loadEpgSources() {
       programmesByChannel.get(id).push(block);
     }
     return { country: source.country, channels, programmesByChannel };
-  }));
-}
+  });
+});
 
-async function buildEpg() {
-  if (cache.epg.value && Date.now() - cache.epg.at < TTL) return cache.epg.value;
+const buildEpg = coalesce(async () => {
+  if (cache.epg.value && Date.now() - cache.epg.at < sourcesCache.ttl()) return cache.epg.value;
 
   const [entries, sources] = await Promise.all([getPlaylistEntries(), loadEpgSources()]);
   const allChannels = sources.flatMap(s => s.channels);
@@ -279,13 +286,13 @@ async function buildEpg() {
     }
   };
   return value;
-}
+});
 
-async function buildEpgGz() {
-  if (cache.epgGz.value && Date.now() - cache.epgGz.at < TTL) return cache.epgGz.value;
+const buildEpgGz = coalesce(async () => {
+  if (cache.epgGz.value && Date.now() - cache.epgGz.at < sourcesCache.ttl()) return cache.epgGz.value;
   await buildEpg();
   return cache.epgGz.value;
-}
+});
 
 function send(res, status, body, contentType, extra = {}) {
   res.writeHead(status, {
